@@ -1,3 +1,4 @@
+from src.observation import analyze_observation
 import requests
 import time
 
@@ -81,6 +82,7 @@ def main():
 
         stage = classify_stage(age_minutes)
 
+        observation = analyze_observation(base.get("address", "?"))
         results.append(
             {
                 "score": final_score,
