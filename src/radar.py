@@ -1,4 +1,5 @@
 import requests
+from scoring import calculate_score
 from config import MIN_LIQUIDITY_USD, MIN_VOLUME_24H_USD
 URL="https://api.dexscreener.com/token-profiles/latest/v1"
 def main():
@@ -14,6 +15,7 @@ def main():
         b=p.get("baseToken",{}); l=p.get("liquidity",{}).get("usd"); v=p.get("volume",{}).get("h24"); t=p.get("txns",{}).get("h24",{}); buys=t.get("buys",0) or 0; sells=t.get("sells",0) or 0
         ok=l is not None and v is not None and l>=MIN_LIQUIDITY_USD and v>=MIN_VOLUME_24H_USD and buys>=0.8*max(sells,1)
         passed+=ok
-        print(f"[{"PASS" if ok else "REJECT"}] {b.get("symbol","?")} | liq=${l} | vol24h=${v} | buys={buys} | sells={sells}")
+        score=calculate_score(p)
+        print(f"[{"PASS" if ok else "REJECT"}] {b.get("symbol","?")} | score={score}/100 | liq=${l} | vol24h=${v} | buys={buys} | sells={sells}")
     print(f"Pairs passing first filter: {passed}")
 if __name__=="__main__":main()
