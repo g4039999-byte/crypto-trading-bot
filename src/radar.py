@@ -1,64 +1,19 @@
 import requests
-
-PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
-TOKENS_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
-
-
-def get_latest_solana_tokens():
-    response = requests.get(PROFILES_URL, timeout=10)
-    response.raise_for_status()
-
-    return [
-        token
-        for token in response.json()
-        if token.get("chainId") == "solana"
-        and token.get("tokenAddress")
-    ]
-
-
-def get_market_data(addresses):
-    joined = ",".join(addresses)
-
-    response = requests.get(
-        TOKENS_URL.format(addresses=joined),
-        timeout=10,
-    )
-    response.raise_for_status()
-
-    return response.json()
-
-
+from config import MIN_LIQUIDITY_USD, MIN_VOLUME_24H_USD
+URL="https://api.dexscreener.com/token-profiles/latest/v1"
 def main():
-    profiles = get_latest_solana_tokens()
-    addresses = [token["tokenAddress"] for token in profiles[:30]]
-
+    profiles=requests.get(URL,timeout=10).json()
+    addresses=[x["tokenAddress"] for x in profiles if x.get("chainId")=="solana" and x.get("tokenAddress")]
     print(f"Solana tokens discovered: {len(addresses)}")
-
-    if not addresses:
-        return
-
-    pairs = get_market_data(addresses)
-
+    if not addresses:return
+    url=f"https://api.dexscreener.com/tokens/v1/solana/{",".join(addresses[:30])}"
+    pairs=requests.get(url,timeout=10).json()
     print(f"Market pairs returned: {len(pairs)}")
-    print()
-
-    for pair in pairs:
-        base = pair.get("baseToken", {})
-        txns = pair.get("txns", {}).get("h24", {})
-        volume = pair.get("volume", {}).get("h24")
-        price_change = pair.get("priceChange", {}).get("h24")
-        liquidity = pair.get("liquidity", {}).get("usd")
-
-        print(
-            f"{base.get('symbol', '?')} | "
-            f"price=${pair.get('priceUsd')} | "
-            f"liq=${liquidity} | "
-            f"vol24h=${volume} | "
-            f"buys24h={txns.get('buys', 0)} | "
-            f"sells24h={txns.get('sells', 0)} | "
-            f"change24h={price_change}%"
-        )
-
-
-if __name__ == "__main__":
-    main()
+    passed=0
+    for p in pairs:
+        b=p.get("baseToken",{}); l=p.get("liquidity",{}).get("usd"); v=p.get("volume",{}).get("h24"); t=p.get("txns",{}).get("h24",{}); buys=t.get("buys",0) or 0; sells=t.get("sells",0) or 0
+        ok=l is not None and v is not None and l>=MIN_LIQUIDITY_USD and v>=MIN_VOLUME_24H_USD and buys>=0.8*max(sells,1)
+        passed+=ok
+        print(f"[{"PASS" if ok else "REJECT"}] {b.get("symbol","?")} | liq=${l} | vol24h=${v} | buys={buys} | sells={sells}")
+    print(f"Pairs passing first filter: {passed}")
+if __name__=="__main__":main()
