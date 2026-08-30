@@ -1,4 +1,9 @@
+import time
+
 def calculate_score(pair):
+    pair_created = pair.get("pairCreatedAt")
+    age_minutes = ((time.time() * 1000 - pair_created) / 60000) if pair_created else None
+
     liquidity = pair.get("liquidity", {}).get("usd")
     volume = pair.get("volume", {}).get("h24")
     change = pair.get("priceChange", {}).get("h24")
@@ -10,6 +15,13 @@ def calculate_score(pair):
         return 0
 
     score = 0
+
+    if age_minutes is not None and age_minutes <= 60:
+        score += 15
+    elif age_minutes is not None and age_minutes <= 240:
+        score += 10
+    elif age_minutes is not None and age_minutes <= 1440:
+        score += 5
 
     if liquidity >= 5000:
         score += 20
