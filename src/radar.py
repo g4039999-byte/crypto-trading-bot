@@ -5,6 +5,7 @@ from config import MIN_LIQUIDITY_USD, MIN_VOLUME_24H_USD
 from scoring import calculate_score
 from momentum import calculate_momentum
 from stage import classify_stage
+from snapshot import save_snapshot
 
 PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 TOKENS_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
@@ -61,6 +62,7 @@ def main():
 
         passed += int(ok)
 
+        save_snapshot(base.get("address", "?"), pair)
         base_score = calculate_score(pair)
         momentum_score = calculate_momentum(pair)
 
