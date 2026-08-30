@@ -1,8 +1,9 @@
 import requests
 import time
 
-from scoring import calculate_score
 from config import MIN_LIQUIDITY_USD, MIN_VOLUME_24H_USD
+from scoring import calculate_score
+from momentum import calculate_momentum
 
 PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 TOKENS_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
@@ -16,7 +17,8 @@ def main():
     addresses = [
         item["tokenAddress"]
         for item in profiles
-        if item.get("chainId") == "solana" and item.get("tokenAddress")
+        if item.get("chainId") == "solana"
+        and item.get("tokenAddress")
     ]
 
     print(f"Solana tokens discovered: {len(addresses)}")
@@ -24,7 +26,10 @@ def main():
     if not addresses:
         return
 
-    url = TOKENS_URL.format(addresses=",".join(addresses[:30]))
+    url = TOKENS_URL.format(
+        addresses=",".join(addresses[:30])
+    )
+
     pairs_response = requests.get(url, timeout=10)
     pairs_response.raise_for_status()
     pairs = pairs_response.json()
@@ -36,9 +41,13 @@ def main():
 
     for pair in pairs:
         base = pair.get("baseToken", {})
+        symbol = base.get("symbol", "?")
+        address = base.get("address", "?")
+
         liquidity = pair.get("liquidity", {}).get("usd")
         volume = pair.get("volume", {}).get("h24")
         txns = pair.get("txns", {}).get("h24", {})
+
         buys = txns.get("buys", 0) or 0
         sells = txns.get("sells", 0) or 0
 
@@ -52,7 +61,11 @@ def main():
 
         passed += int(ok)
 
-        score = calculate_score(pair)
+        base_score = calculate_score(pair)
+        momentum_score = calculate_momentum(pair)
+        final_score = round(
+            (base_score * 0.60) + (momentum_score * 0.40)
+        )
 
         created = pair.get("pairCreatedAt")
         age_minutes = (
@@ -62,35 +75,46 @@ def main():
         )
 
         results.append(
-            (
-                score,
-                ok,
-                base.get("symbol", "?"),
-                age_minutes,
-                liquidity,
-                volume,
-                buys,
-                sells,
-            )
+            {
+                "score": final_score,
+                "base_score": base_score,
+                "momentum": momentum_score,
+                "ok": ok,
+                "symbol": symbol,
+                "address": address,
+                "age": age_minutes,
+                "liquidity": liquidity,
+                "volume": volume,
+                "buys": buys,
+                "sells": sells,
+            }
         )
 
-    results.sort(key=lambda item: item[0], reverse=True)
+    results.sort(key=lambda item: item["score"], reverse=True)
 
     print()
-    print("=== RANKED RESULTS ===")
+    print("=== FINAL RANKED RESULTS ===")
 
-    for score, ok, symbol, age, liquidity, volume, buys, sells in results:
-        age_text = f"{age:.1f}m" if age is not None else "N/A"
-        status = "PASS" if ok else "REJECT"
+    for item in results:
+        age_text = (
+            f"{item['age']:.1f}m"
+            if item["age"] is not None
+            else "N/A"
+        )
+
+        status = "PASS" if item["ok"] else "REJECT"
 
         print(
-            f"[{status}] {symbol} | "
-            f"score={score}/100 | "
+            f"[{status}] "
+            f"{item['symbol']} | "
+            f"FINAL={item['score']}/100 | "
+            f"base={item['base_score']} | "
+            f"momentum={item['momentum']} | "
             f"age={age_text} | "
-            f"liq=${liquidity} | "
-            f"vol24h=${volume} | "
-            f"buys={buys} | "
-            f"sells={sells}"
+            f"liq=${item['liquidity']} | "
+            f"vol24h=${item['volume']} | "
+            f"buys={item['buys']} | "
+            f"sells={item['sells']}"
         )
 
     print()
