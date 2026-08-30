@@ -4,6 +4,7 @@ import time
 from config import MIN_LIQUIDITY_USD, MIN_VOLUME_24H_USD
 from scoring import calculate_score
 from momentum import calculate_momentum
+from stage import classify_stage
 
 PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 TOKENS_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
@@ -42,7 +43,6 @@ def main():
     for pair in pairs:
         base = pair.get("baseToken", {})
         symbol = base.get("symbol", "?")
-        address = base.get("address", "?")
 
         liquidity = pair.get("liquidity", {}).get("usd")
         volume = pair.get("volume", {}).get("h24")
@@ -63,34 +63,41 @@ def main():
 
         base_score = calculate_score(pair)
         momentum_score = calculate_momentum(pair)
+
         final_score = round(
-            (base_score * 0.60) + (momentum_score * 0.40)
+            (base_score * 0.60) +
+            (momentum_score * 0.40)
         )
 
         created = pair.get("pairCreatedAt")
+
         age_minutes = (
             (time.time() * 1000 - created) / 60000
             if created
             else None
         )
 
+        stage = classify_stage(age_minutes)
+
         results.append(
             {
                 "score": final_score,
-                "base_score": base_score,
-                "momentum": momentum_score,
                 "ok": ok,
                 "symbol": symbol,
-                "address": address,
+                "stage": stage,
                 "age": age_minutes,
                 "liquidity": liquidity,
                 "volume": volume,
                 "buys": buys,
                 "sells": sells,
+                "address": base.get("address", "?"),
             }
         )
 
-    results.sort(key=lambda item: item["score"], reverse=True)
+    results.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
 
     print()
     print("=== FINAL RANKED RESULTS ===")
@@ -108,8 +115,7 @@ def main():
             f"[{status}] "
             f"{item['symbol']} | "
             f"FINAL={item['score']}/100 | "
-            f"base={item['base_score']} | "
-            f"momentum={item['momentum']} | "
+            f"{item['stage']} | "
             f"age={age_text} | "
             f"liq=${item['liquidity']} | "
             f"vol24h=${item['volume']} | "
