@@ -62,3 +62,23 @@ def save_snapshot(token_address, pair):
 def load_snapshots(token_address):
     data = _load_all()
     return data.get(token_address, [])
+
+
+def known_addresses(limit=None):
+    """Every token address with at least one saved snapshot, most
+    recently updated first. Used to build a "watchlist" so the radar
+    keeps re-checking tokens it has already seen even once they drop out
+    of DexScreener's "latest profiles" feed -- without this, most tokens
+    would only ever get a single snapshot and observation.py would keep
+    reporting INSUFFICIENT_DATA forever instead of a real trend.
+    """
+    data = _load_all()
+
+    def last_seen(address):
+        history = data.get(address) or []
+        return history[-1].get("timestamp", "") if history else ""
+
+    addresses = sorted(data.keys(), key=last_seen, reverse=True)
+    if limit is not None:
+        addresses = addresses[:limit]
+    return addresses

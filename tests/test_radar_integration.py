@@ -91,6 +91,36 @@ class TestRadarIntegration(unittest.TestCase):
             results = radar.run_radar()
         self.assertEqual(results, [])
 
+    def test_watchlist_keeps_a_previously_seen_token_in_the_query_and_builds_a_real_trend(self):
+        good_pair = FIXTURE_PAIRS[0]  # addr-good / GOOD
+
+        # Cycle 1: addr-good is newly discovered -- first snapshot saved,
+        # trend is necessarily INSUFFICIENT_DATA (only one data point).
+        with mock.patch("src.radar.fetch_solana_token_addresses", return_value=["addr-good"]), mock.patch(
+            "src.radar.fetch_pairs", return_value=[good_pair]
+        ) as mock_fetch_pairs:
+            results_cycle_1 = radar.run_radar()
+
+        mock_fetch_pairs.assert_called_once_with(["addr-good"])
+        self.assertEqual(results_cycle_1[0]["trend"], "INSUFFICIENT_DATA")
+
+        # Cycle 2: DexScreener's "latest profiles" feed no longer surfaces
+        # addr-good (it discovers something else instead) -- the
+        # watchlist should still pull addr-good back in, giving it a
+        # second snapshot and therefore a real trend.
+        with mock.patch("src.radar.fetch_solana_token_addresses", return_value=["addr-other"]), mock.patch(
+            "src.radar.fetch_pairs", return_value=[good_pair]
+        ) as mock_fetch_pairs:
+            results_cycle_2 = radar.run_radar()
+
+        queried_addresses = mock_fetch_pairs.call_args[0][0]
+        self.assertIn("addr-good", queried_addresses)
+        self.assertIn("addr-other", queried_addresses)
+
+        good_result = next(r for r in results_cycle_2 if r["symbol"] == "GOOD")
+        self.assertNotEqual(good_result["trend"], "INSUFFICIENT_DATA")
+        self.assertIn(good_result["trend"], ("STRONG", "RISING", "NEUTRAL", "WEAK"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,3 +8,8 @@ __pycache__/
 data/positions.json
 data/trade_log.jsonl
 data/STOP_TRADING
+
+# Paper-trading runtime state -- same reasoning, entirely separate from
+# the (still unused) live-trading files above.
+data/paper_positions.json
+data/paper_trade_log.jsonl

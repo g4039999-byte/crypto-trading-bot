@@ -15,16 +15,23 @@ This module only discovers, scores and logs candidates. It does not place
 any order and does not touch a wallet -- see README.md.
 """
 
+import argparse
 import logging
 import time
 
-from src.config import MIN_BUY_SELL_RATIO, MIN_LIQUIDITY_USD, MIN_VOLUME_24H_USD
+from src.config import (
+    MIN_BUY_SELL_RATIO,
+    MIN_LIQUIDITY_USD,
+    MIN_VOLUME_24H_USD,
+    RADAR_LOOP_INTERVAL_SECONDS,
+    RADAR_WATCHLIST_SIZE,
+)
 from src.dex_client import fetch_pairs, fetch_solana_token_addresses
 from src.logging_config import setup_logging
 from src.momentum import calculate_momentum
 from src.observation import analyze_observation
 from src.scoring import calculate_score
-from src.snapshot import save_snapshot
+from src.snapshot import known_addresses, save_snapshot
 from src.stage import classify_stage
 from src.utils import safe_get
 
@@ -117,8 +124,25 @@ def run_radar():
     of result dicts (possibly empty) -- never raises for network/data
     problems, since dex_client and evaluate_pair already degrade
     gracefully and log what happened.
+
+    Queries both newly-discovered addresses (DexScreener's "latest
+    profiles" feed) and a watchlist of previously-seen addresses
+    (RADAR_WATCHLIST_SIZE, from data/snapshots.json), so a token keeps
+    accumulating snapshots across cycles instead of only ever getting
+    one -- that's what lets observation.py report a real trend instead
+    of INSUFFICIENT_DATA once the radar has run more than once.
     """
-    addresses = fetch_solana_token_addresses()
+    discovered = fetch_solana_token_addresses()
+    watchlist = known_addresses(limit=RADAR_WATCHLIST_SIZE) if RADAR_WATCHLIST_SIZE > 0 else []
+
+    # Preserve order (newest discoveries first) while de-duplicating.
+    addresses = list(dict.fromkeys(discovered + watchlist))
+
+    if watchlist:
+        logger.info(
+            "Querying %s address(es): %s newly discovered + %s from the watchlist",
+            len(addresses), len(discovered), len(watchlist),
+        )
 
     if not addresses:
         logger.warning("No Solana token addresses discovered this run -- nothing to score")
@@ -155,12 +179,15 @@ def _format_line(item):
     )
 
 
-def main():
-    setup_logging()
-    logger.info("Starting radar run")
-
+def run_once(on_results=None):
+    """One discover-score-print cycle. Returns the results list.
+    on_results(results), if given, is called after printing -- this is
+    the hook src.paper_trader (or any future consumer) plugs into,
+    keeping radar.py itself unaware of what trading logic exists.
+    Exceptions from on_results are logged, not raised, so a problem in a
+    downstream consumer never breaks the radar's own loop.
+    """
     results = run_radar()
-
     passed = sum(1 for item in results if item["ok"])
 
     print()
@@ -171,6 +198,69 @@ def main():
     print()
     print(f"Pairs evaluated: {len(results)} | Pairs passing first filter: {passed}")
     logger.info("Radar run complete: %s evaluated, %s passed the first filter", len(results), passed)
+
+    if on_results is not None:
+        try:
+            on_results(results)
+        except Exception:
+            logger.exception("on_results callback failed -- continuing the radar loop regardless")
+
+    return results
+
+
+def run_forever(interval_seconds=None, max_iterations=None, on_results=None):
+    """Run run_once() repeatedly, sleeping interval_seconds between
+    cycles, until interrupted (Ctrl+C) or max_iterations is reached
+    (None = forever -- max_iterations exists mainly for bounded demo/test
+    runs). One cycle raising does not stop the loop: it is logged and
+    the loop continues after the usual sleep.
+    """
+    interval_seconds = RADAR_LOOP_INTERVAL_SECONDS if interval_seconds is None else interval_seconds
+    logger.info("Starting continuous radar loop (interval=%ss)", interval_seconds)
+
+    iteration = 0
+    try:
+        while max_iterations is None or iteration < max_iterations:
+            iteration += 1
+            logger.info("--- Radar cycle %s ---", iteration)
+            try:
+                run_once(on_results=on_results)
+            except Exception:
+                logger.exception("Radar cycle %s failed -- will retry next cycle", iteration)
+
+            if max_iterations is not None and iteration >= max_iterations:
+                break
+
+            time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        logger.info("Radar loop stopped by user (Ctrl+C) after %s cycle(s)", iteration)
+
+
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Solana meme-token discovery radar")
+    parser.add_argument("--loop", action="store_true", help="run continuously instead of once")
+    parser.add_argument("--interval", type=float, default=None, help="seconds between cycles in --loop mode")
+    parser.add_argument("--max-iterations", type=int, default=None, help="stop --loop after N cycles (mainly for testing)")
+    parser.add_argument("--paper", action="store_true", help="run paper trading decisions on each cycle's results")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    setup_logging()
+    args = _parse_args(argv)
+
+    on_results = None
+    if args.paper:
+        from src.paper_trader import run_paper_cycle  # imported lazily so --paper stays opt-in
+
+        on_results = run_paper_cycle
+        logger.info("Paper trading is ENABLED for this run -- simulated only, no real funds or orders")
+
+    if args.loop:
+        run_forever(interval_seconds=args.interval, max_iterations=args.max_iterations, on_results=on_results)
+    else:
+        logger.info("Starting radar run")
+        run_once(on_results=on_results)
 
 
 if __name__ == "__main__":

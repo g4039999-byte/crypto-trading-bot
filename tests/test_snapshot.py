@@ -62,6 +62,23 @@ class TestSnapshot(unittest.TestCase):
         data = json.loads(snapshot.SNAPSHOT_FILE.read_text(encoding="utf-8"))
         self.assertIn("token-a", data)
 
+    def test_known_addresses_empty_when_no_data(self):
+        self.assertEqual(snapshot.known_addresses(), [])
+
+    def test_known_addresses_most_recent_first(self):
+        snapshot.save_snapshot("token-old", self.make_pair())
+        snapshot.save_snapshot("token-new", self.make_pair())
+        # token-old gets a second, more recent snapshot -- it should now
+        # sort ahead of token-new.
+        snapshot.save_snapshot("token-old", self.make_pair(price="2"))
+
+        self.assertEqual(snapshot.known_addresses(), ["token-old", "token-new"])
+
+    def test_known_addresses_respects_limit(self):
+        for i in range(5):
+            snapshot.save_snapshot(f"token-{i}", self.make_pair())
+        self.assertEqual(len(snapshot.known_addresses(limit=2)), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

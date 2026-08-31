@@ -66,6 +66,17 @@ MAX_ADDRESSES_PER_REQUEST = _get_int("MAX_ADDRESSES_PER_REQUEST", 30)
 # How many historical snapshots to keep per token (data/snapshots.json).
 SNAPSHOT_HISTORY_LIMIT = _get_int("SNAPSHOT_HISTORY_LIMIT", 60)
 
+# How many previously-seen tokens to keep re-checking each cycle (on top
+# of whatever DexScreener's "latest profiles" feed returns), so a token
+# keeps accumulating snapshots -- and observation.py can report a real
+# trend -- even after it drops out of that feed. 0 disables the
+# watchlist and restores the original behavior (newly-discovered tokens
+# only).
+RADAR_WATCHLIST_SIZE = _get_int("RADAR_WATCHLIST_SIZE", 100)
+
+# --- Continuous mode (`python -m src.radar --loop`) ---
+RADAR_LOOP_INTERVAL_SECONDS = _get_float("RADAR_LOOP_INTERVAL_SECONDS", 300)
+
 # Logging.
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 

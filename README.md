@@ -4,12 +4,14 @@ A radar that discovers newly-listed Solana meme tokens on [DexScreener](https://
 scores them, tracks how they change over time, and prints a ranked list.
 
 **No real trade has ever been placed by this project.** The radar
-(discovery/analysis) is fully working. A live-trading *safety layer* has
-since been added (risk screening, position sizing, stop-loss/take-profit,
-a kill switch, decision logging) but it is disabled by every gate it has,
-by default, and stays that way until a human deliberately enables it after
-reading the "Live trading" section below in full. See that section for
-exactly what is and is not implemented yet.
+(discovery/analysis) is fully working and confirmed against the live
+DexScreener API, can run continuously (`--loop`), and now has a **paper
+trading** mode (`--paper`) that rehearses full buy/sell cycles with
+simulated funds under the same rules real trading would use. A
+live-trading *safety layer* also exists (risk screening, position sizing,
+stop-loss/take-profit, a kill switch, decision logging) but real order
+sending is not implemented and is disabled by every gate it has, by
+default -- see "Live trading" below for exactly what is and is not done.
 
 ## How it works
 
@@ -36,14 +38,27 @@ For every candidate Solana pair, the radar runs it through a pipeline:
 `src/radar.py` wires all of the above together (`evaluate_pair` /
 `run_radar`) and prints the ranked results.
 
+Each cycle queries two sets of addresses, merged: whatever DexScreener's
+"latest profiles" feed discovers *this* cycle, plus a watchlist of up to
+`RADAR_WATCHLIST_SIZE` (default 100) previously-seen addresses pulled
+from `data/snapshots.json` (`snapshot.known_addresses()`). Without the
+watchlist, a token would typically get exactly one snapshot -- the feed
+moves on to newer tokens fast -- and `observation.py` would report
+`INSUFFICIENT_DATA` forever. With it, a token keeps accumulating
+snapshots across cycles even after it drops out of "latest", so a real
+trend (`STRONG`/`RISING`/`NEUTRAL`/`WEAK`) shows up from its second
+sighting onward.
+
 ## Project layout
 
 ```
 crypto-trading-bot/
 ├── data/
-│   ├── snapshots.json      # per-token history the radar reads/writes
-│   ├── positions.json      # live-trading state (git-ignored, created at runtime)
-│   └── trade_log.jsonl     # every trading decision, one JSON object per line (git-ignored)
+│   ├── snapshots.json          # per-token history the radar reads/writes
+│   ├── positions.json          # live-trading state (git-ignored, created at runtime)
+│   ├── trade_log.jsonl         # every LIVE trading decision (git-ignored)
+│   ├── paper_positions.json    # paper-trading state (git-ignored, created at runtime)
+│   └── paper_trade_log.jsonl   # every PAPER trading decision (git-ignored)
 ├── src/
 │   ├── config.py           # thresholds + operational settings (env-overridable)
 │   ├── dex_client.py       # all network calls to DexScreener, with retries
@@ -52,9 +67,13 @@ crypto-trading-bot/
 │   ├── momentum.py         # momentum score (0-75)
 │   ├── scoring.py          # base score (0-100)
 │   ├── stage.py            # pair-age classification
-│   ├── snapshot.py         # snapshot persistence
+│   ├── snapshot.py         # snapshot persistence + known_addresses() watchlist
 │   ├── observation.py      # trend detection from snapshot history
-│   ├── radar.py            # discovery/analysis pipeline + entry point
+│   ├── radar.py            # discovery/analysis pipeline + entry point (single run, --loop, --paper)
+│   │
+│   ├── paper_portfolio.py  # PAPER position sizing/tracking -- data/paper_positions.json only
+│   ├── paper_logger.py     # writes data/paper_trade_log.jsonl
+│   ├── paper_trader.py     # PAPER entry/exit decisions -- no wallet, no kill switch, no real risk
 │   │
 │   ├── kill_switch.py      # the one choke point every live-trading path must pass
 │   ├── jupiter_client.py   # read-only Jupiter quotes + honeypot/round-trip check
@@ -108,12 +127,33 @@ Pairs evaluated: 2 | Pairs passing first filter: 1
 Each run also appends a snapshot per token to `data/snapshots.json`, which
 is what lets `observation.py` compute a trend on the *next* run.
 
-> **Network note:** DexScreener's API was not reachable from the sandbox
-> this update was built in (its egress is restricted), so the full run
-> above was only exercised with mocked data (see Testing). Run it on a
-> machine with normal internet access to see live results -- the retry
-> and error-handling logic was written and tested specifically to degrade
-> gracefully rather than crash if that endpoint is ever slow or down.
+> **Network note:** DexScreener's API is unreachable from the sandboxed
+> environments this project was built in (both the cloud session and its
+> desktop-bridge shell have restricted egress), so most of this was
+> validated with mocked data (see Testing) plus real runs confirmed
+> working end-to-end on the machine actually running the bot -- that is
+> where `python -m src.radar` should always be run from.
+
+### Continuous mode
+
+```bash
+python -m src.radar --loop                       # run forever, every RADAR_LOOP_INTERVAL_SECONDS (default 300s)
+python -m src.radar --loop --interval 60          # override the interval for this run
+python -m src.radar --loop --max-iterations 5     # stop after 5 cycles (mainly for a bounded test/demo)
+```
+
+Stop an unbounded `--loop` run with Ctrl+C -- it exits cleanly after the
+current cycle. A single cycle raising an unexpected error is logged and
+the loop continues at the next scheduled interval rather than dying;
+network failures were already handled gracefully before this (see
+"Error handling notes" below), continuous mode just means the process
+keeps going afterward instead of exiting.
+
+The first few cycles after a fresh `data/snapshots.json` will show mostly
+`INSUFFICIENT_DATA` (each token still only has one snapshot). From the
+second time a token is seen onward -- either because it's still in
+DexScreener's "latest" feed or because the watchlist pulled it back in --
+`trend` becomes a real value.
 
 ## Testing
 
@@ -131,20 +171,27 @@ run the same tests with nicer output:
 pytest
 ```
 
-88 tests, all passing. Coverage: `stage`, `momentum`, `scoring` (pure
+112 tests, all passing. Coverage: `stage`, `momentum`, `scoring` (pure
 functions, including malformed/null-field inputs), `snapshot`
-(save/load/trim/corrupt-file recovery, via a temp file), `observation`
-(trend logic, mocked snapshot history), `dex_client` (batching, retries,
-failure handling, all with `requests.get` mocked -- no real network
-calls), an end-to-end `radar.run_radar()` test against fixture pair data,
-plus the live-trading safety layer: `kill_switch` (every gate, engage/
-release), `portfolio` (position sizing caps, stop-loss/take-profit,
-daily-loss cap, corrupt-state recovery), `risk` (every rejection reason),
-`jupiter_client` (round-trip/honeypot logic, mocked), `live_trader`
-(entry/exit decisions, including a regression test that the module never
-imports `wallet`), and `wallet` (seed-phrase detection, the
-`EXECUTION_ENABLED_IN_CODE` gate, `connection_test()` degrading gracefully
-without network) -- all without touching the network or a real wallet.
+(save/load/trim/corrupt-file recovery, plus `known_addresses()`
+watchlist ordering/limit), `observation` (trend logic, mocked snapshot
+history), `dex_client` (batching, retries, failure handling, all with
+`requests.get` mocked -- no real network calls), `radar` (end-to-end
+`run_radar()` against fixture pair data, the watchlist keeping a token
+in rotation across two cycles until it gets a real trend, `--loop`'s
+iteration/interval/error-recovery/Ctrl+C behavior, and CLI parsing),
+`paper_portfolio` + `paper_trader` (a full simulated buy -> take-profit
+sell and buy -> stop-loss sell cycle with correct P&L, honeypot/low-score
+rejection, and a regression test that paper_trader never imports
+`wallet` or the kill switch), plus the live-trading safety layer:
+`kill_switch` (every gate, engage/release), `portfolio` (position sizing
+caps, stop-loss/take-profit, daily-loss cap, corrupt-state recovery),
+`risk` (every rejection reason), `jupiter_client` (round-trip/honeypot
+logic, mocked), `live_trader` (entry/exit decisions, including a
+regression test that the module never imports `wallet`), and `wallet`
+(seed-phrase detection, the `EXECUTION_ENABLED_IN_CODE` gate,
+`connection_test()` degrading gracefully without network) -- all without
+touching the network or a real wallet.
 
 ## Error handling notes
 
@@ -160,6 +207,45 @@ without network) -- all without touching the network or a real wallet.
   otherwise crash a plain `.get(x, {}).get(y)` chain.
 - `snapshot.py` recovers from a missing or corrupted `data/snapshots.json`
   by starting fresh instead of crashing, and logs the problem.
+
+## Paper trading (simulated -- no wallet, no real funds, ever)
+
+`src/paper_trader.py` runs the *exact same* entry/exit rules the live
+layer below uses (`MIN_LIVE_SCORE`, trend must be `STRONG`/`RISING`,
+liquidity/volume/age screening, the Jupiter sellability check, stop-loss
+`-25%`/take-profit `+50%`, one position at a time, the daily-loss cap)
+against a fully simulated position. It is structurally incapable of
+placing a real order: it never imports `src/wallet.py` or
+`src/kill_switch.py` at all (enforced by a regression test), and its
+state lives in `data/paper_positions.json` / `data/paper_trade_log.jsonl`
+-- files the live layer never reads or writes.
+
+```bash
+python -m src.radar --paper                 # one cycle, paper decisions only
+python -m src.radar --loop --paper           # continuous: radar + paper trading together
+```
+
+Each cycle: any open paper position is checked against the current price
+for a stop-loss/take-profit exit first; then the highest-scoring
+qualifying candidate (if any, and if there's room under the position/
+daily-loss caps) is "bought" with simulated funds sized the same way live
+sizing would be (`MAX_TRADE_USD`, capped by `MAX_CAPITAL_DEPLOYMENT_PCT`
+of `TOTAL_CAPITAL_USD`). Every decision -- BUY, SKIP (with the exact
+reason), SELL -- is appended to `data/paper_trade_log.jsonl`, tagged
+`"mode": "PAPER"`.
+
+A full buy-then-sell cycle (score/trend/risk screening passes -> position
+opens with correct stop-loss/take-profit prices sized correctly ->
+price crosses take-profit or stop-loss -> position closes with the
+right realized P&L -> the slot frees up) is exercised end-to-end in
+`tests/test_paper_trader.py` with synthetic price data, since waiting for
+a real token to actually hit either level can take anywhere from minutes
+to days. Run `python -m src.radar --loop --paper` for a while against
+real market data to build up a realistic paper track record before ever
+considering live trading.
+
+To start a fresh paper run: `python -c "from src.paper_portfolio import reset_paper_state; reset_paper_state()"`
+(only ever touches `data/paper_positions.json`).
 
 ## Live trading (disabled by default -- read this before changing anything)
 
@@ -250,10 +336,13 @@ be without those explicit steps.
 
 ## What's next
 
+- Run `python -m src.radar --loop --paper` for a real stretch of time to
+  build an actual paper track record before considering live trading.
 - Implement and test `wallet.build_and_send_swap()` against a throwaway
   wallet (see above) -- the only piece standing between this and real
   execution.
-- A real scheduler/loop (the radar currently runs once per invocation).
-- A live price feed for `live_trader.run_live_cycle()`'s exit checks
-  (currently expects a `{token_address: price}` map to be supplied).
+- `live_trader.run_live_cycle()` still expects a `{token_address: price}`
+  map for exit checks to be supplied by the caller (paper_trader.py
+  already derives this from each cycle's radar results -- the live path
+  should do the same once it's ever wired up for real).
 - CI to run the test suite automatically on push.
