@@ -1,57 +1,64 @@
 import json
+import logging
 from pathlib import Path
 from datetime import datetime, timezone
 
+from src.config import SNAPSHOT_HISTORY_LIMIT
+from src.utils import safe_get
 
-SNAPSHOT_FILE = Path("data/snapshots.json")
+logger = logging.getLogger(__name__)
+
+# Resolved relative to the project root (parent of src/) so this works no
+# matter what directory the radar is launched from, e.g. both
+# `python -m src.radar` from the repo root and running tests from elsewhere.
+SNAPSHOT_FILE = Path(__file__).resolve().parent.parent / "data" / "snapshots.json"
+
+
+def _load_all():
+    if not SNAPSHOT_FILE.exists():
+        return {}
+
+    try:
+        return json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not read snapshot file (%s) -- starting fresh: %s", SNAPSHOT_FILE, exc)
+        return {}
 
 
 def save_snapshot(token_address, pair):
-    SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    """Append a snapshot for token_address, trimmed to the configured
+    history limit. Failures are logged, never raised, so a snapshot
+    write problem cannot bring down the rest of the radar run.
+    """
+    if not token_address or token_address == "?":
+        logger.debug("Skipping snapshot save: no usable token address")
+        return
 
-    if SNAPSHOT_FILE.exists():
-        try:
-            data = json.loads(
-                SNAPSHOT_FILE.read_text(encoding="utf-8")
-            )
-        except (json.JSONDecodeError, OSError):
-            data = {}
-    else:
-        data = {}
+    try:
+        SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        data = _load_all()
 
-    token_history = data.setdefault(token_address, [])
+        token_history = data.setdefault(token_address, [])
 
-    txns = pair.get("txns", {}).get("h24", {})
+        pair = pair if isinstance(pair, dict) else {}
 
-    snapshot = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "price_usd": pair.get("priceUsd"),
-        "liquidity_usd": pair.get("liquidity", {}).get("usd"),
-        "volume_24h": pair.get("volume", {}).get("h24"),
-        "buys_24h": txns.get("buys", 0),
-        "sells_24h": txns.get("sells", 0),
-    }
+        snapshot = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "price_usd": pair.get("priceUsd"),
+            "liquidity_usd": safe_get(pair, "liquidity", "usd"),
+            "volume_24h": safe_get(pair, "volume", "h24"),
+            "buys_24h": safe_get(pair, "txns", "h24", "buys", default=0),
+            "sells_24h": safe_get(pair, "txns", "h24", "sells", default=0),
+        }
 
-    token_history.append(snapshot)
+        token_history.append(snapshot)
+        data[token_address] = token_history[-SNAPSHOT_HISTORY_LIMIT:]
 
-    # Keep only the latest 60 snapshots per token.
-    data[token_address] = token_history[-60:]
-
-    SNAPSHOT_FILE.write_text(
-        json.dumps(data, indent=2),
-        encoding="utf-8",
-    )
+        SNAPSHOT_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except (OSError, TypeError, AttributeError) as exc:
+        logger.error("Failed to save snapshot for %s: %s", token_address, exc)
 
 
 def load_snapshots(token_address):
-    if not SNAPSHOT_FILE.exists():
-        return []
-
-    try:
-        data = json.loads(
-            SNAPSHOT_FILE.read_text(encoding="utf-8")
-        )
-    except (json.JSONDecodeError, OSError):
-        return []
-
+    data = _load_all()
     return data.get(token_address, [])

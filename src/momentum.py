@@ -1,11 +1,20 @@
-def calculate_momentum(pair):
-    liquidity = pair.get("liquidity", {}).get("usd") or 0
-    volume_24h = pair.get("volume", {}).get("h24") or 0
-    change_24h = pair.get("priceChange", {}).get("h24") or 0
+from src.utils import safe_get
 
-    txns = pair.get("txns", {}).get("h24", {})
-    buys = txns.get("buys", 0) or 0
-    sells = txns.get("sells", 0) or 0
+
+def calculate_momentum(pair):
+    """Score 0-75 based on short-term momentum. Defensive against missing
+    or explicitly-null fields in the pair payload (returns 0 rather than
+    raising when there isn't enough data to judge momentum).
+    """
+    if not isinstance(pair, dict):
+        return 0
+
+    liquidity = safe_get(pair, "liquidity", "usd", default=0) or 0
+    volume_24h = safe_get(pair, "volume", "h24", default=0) or 0
+    change_24h = safe_get(pair, "priceChange", "h24", default=0) or 0
+
+    buys = safe_get(pair, "txns", "h24", "buys", default=0) or 0
+    sells = safe_get(pair, "txns", "h24", "sells", default=0) or 0
 
     if liquidity <= 0:
         return 0

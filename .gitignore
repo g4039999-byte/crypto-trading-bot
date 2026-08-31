@@ -2,3 +2,9 @@
 .env
 __pycache__/
 *.pyc
+
+# Live-trading runtime state -- regenerated locally, never meant to be
+# shared via git, and never contains secrets (no keys, no seed phrases).
+data/positions.json
+data/trade_log.jsonl
+data/STOP_TRADING

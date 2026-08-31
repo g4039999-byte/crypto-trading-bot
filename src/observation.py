@@ -1,8 +1,29 @@
-from snapshot import load_snapshots
+import logging
+
+from src.snapshot import load_snapshots
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def analyze_observation(token_address):
-    snapshots = load_snapshots(token_address)
+    """Compare the last two snapshots for a token to gauge short-term
+    trend. Never raises -- any unexpected/missing data yields a status
+    the caller can branch on instead of a crash.
+    """
+    try:
+        snapshots = load_snapshots(token_address)
+    except Exception as exc:  # defensive: snapshot storage should not crash the radar
+        logger.error("Could not load snapshots for %s: %s", token_address, exc)
+        return {"status": "ERROR"}
 
     if len(snapshots) < 2:
         return {"status": "INSUFFICIENT_DATA"}
@@ -15,23 +36,16 @@ def analyze_observation(token_address):
             return 0.0
         return ((new - old) / old) * 100
 
-    old_price = float(previous["price_usd"]) if previous["price_usd"] else None
-    new_price = float(current["price_usd"]) if current["price_usd"] else None
-
+    old_price = _safe_float(previous.get("price_usd"))
+    new_price = _safe_float(current.get("price_usd"))
     price_change = pct_change(old_price, new_price)
 
     old_liq = previous.get("liquidity_usd")
     new_liq = current.get("liquidity_usd")
     liquidity_change = pct_change(old_liq, new_liq)
 
-    buys = max(
-        0,
-        (current.get("buys_24h") or 0) - (previous.get("buys_24h") or 0)
-    )
-    sells = max(
-        0,
-        (current.get("sells_24h") or 0) - (previous.get("sells_24h") or 0)
-    )
+    buys = max(0, (current.get("buys_24h") or 0) - (previous.get("buys_24h") or 0))
+    sells = max(0, (current.get("sells_24h") or 0) - (previous.get("sells_24h") or 0))
 
     total = buys + sells
     buy_pressure = buys / total if total else 0.0

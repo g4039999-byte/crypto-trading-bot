@@ -1,0 +1,6 @@
+# Only needed for src/wallet.py (real wallet signing). NOT required for
+# the discovery/analysis radar, and not installed by default -- install
+# this only once you are actually preparing to test live execution
+# (after finishing and reviewing that module -- see its docstring).
+-r requirements.txt
+solders==0.23.0

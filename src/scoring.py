@@ -1,21 +1,27 @@
 import time
 
+from src.utils import safe_get
+
 
 def calculate_score(pair):
-    liquidity = pair.get("liquidity", {}).get("usd")
-    volume = pair.get("volume", {}).get("h24")
-    change = pair.get("priceChange", {}).get("h24")
+    """Score 0-100 based on liquidity, volume, buy pressure, momentum and
+    pair age. Defensive against missing/null fields -- returns 0 when
+    there isn't enough data (no liquidity or volume figure) to score.
+    """
+    if not isinstance(pair, dict):
+        return 0
 
-    txns = pair.get("txns", {}).get("h24", {})
-    buys = txns.get("buys", 0) or 0
-    sells = txns.get("sells", 0) or 0
+    liquidity = safe_get(pair, "liquidity", "usd")
+    volume = safe_get(pair, "volume", "h24")
+    change = safe_get(pair, "priceChange", "h24")
+
+    buys = safe_get(pair, "txns", "h24", "buys", default=0) or 0
+    sells = safe_get(pair, "txns", "h24", "sells", default=0) or 0
 
     pair_created = pair.get("pairCreatedAt")
-    age_minutes = (
-        (time.time() * 1000 - pair_created) / 60000
-        if pair_created
-        else None
-    )
+    age_minutes = None
+    if isinstance(pair_created, (int, float)):
+        age_minutes = (time.time() * 1000 - pair_created) / 60000
 
     if liquidity is None or volume is None:
         return 0
