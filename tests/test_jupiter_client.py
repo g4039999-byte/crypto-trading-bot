@@ -3,7 +3,7 @@ from unittest import mock
 
 import requests
 
-from src.jupiter_client import get_quote, round_trip_check
+from src.jupiter_client import get_quote, get_sol_usd_price, round_trip_check
 
 
 def _mock_response(json_data, status_code=200):
@@ -83,6 +83,21 @@ class TestRoundTripCheck(unittest.TestCase):
 
         self.assertTrue(result["sellable"])  # a route exists...
         self.assertIsNotNone(result["reason"])  # ...but it's flagged as too costly
+
+
+class TestGetSolUsdPrice(unittest.TestCase):
+    def test_derives_price_from_a_1_sol_quote(self):
+        with mock.patch("src.jupiter_client.get_quote", return_value={"outAmount": "150250000"}):
+            price = get_sol_usd_price()
+        self.assertAlmostEqual(price, 150.25)
+
+    def test_returns_none_when_no_quote_available(self):
+        with mock.patch("src.jupiter_client.get_quote", return_value=None):
+            self.assertIsNone(get_sol_usd_price())
+
+    def test_returns_none_on_malformed_out_amount(self):
+        with mock.patch("src.jupiter_client.get_quote", return_value={"outAmount": "not-a-number"}):
+            self.assertIsNone(get_sol_usd_price())
 
 
 if __name__ == "__main__":

@@ -135,6 +135,30 @@ class TestConnectionTest(unittest.TestCase):
         self.assertAlmostEqual(result["balance_sol"], 1.5)
 
 
+class TestGetSplTokenBalanceRaw(unittest.TestCase):
+    def test_sums_amounts_across_token_accounts(self):
+        rpc_result = {
+            "value": [
+                {"account": {"data": {"parsed": {"info": {"tokenAmount": {"amount": "1000"}}}}}},
+                {"account": {"data": {"parsed": {"info": {"tokenAmount": {"amount": "500"}}}}}},
+            ]
+        }
+        with mock.patch("src.wallet._rpc_call", return_value=rpc_result):
+            total = wallet.get_spl_token_balance_raw("Owner1", "Mint1")
+        self.assertEqual(total, 1500)
+
+    def test_returns_zero_when_no_token_account_exists(self):
+        with mock.patch("src.wallet._rpc_call", return_value={"value": []}):
+            total = wallet.get_spl_token_balance_raw("Owner1", "Mint1")
+        self.assertEqual(total, 0)
+
+    def test_ignores_malformed_entries_instead_of_crashing(self):
+        rpc_result = {"value": [{"account": {}}, {"account": {"data": {"parsed": {"info": {"tokenAmount": {"amount": "42"}}}}}}]}
+        with mock.patch("src.wallet._rpc_call", return_value=rpc_result):
+            total = wallet.get_spl_token_balance_raw("Owner1", "Mint1")
+        self.assertEqual(total, 42)
+
+
 class TestRequestSwapTransaction(unittest.TestCase):
     def test_returns_swap_transaction_on_success(self):
         response = mock.Mock()

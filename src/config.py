@@ -186,6 +186,10 @@ SOLANA_PRIVATE_KEY = os.getenv("SOLANA_PRIVATE_KEY", "")
 JUPITER_QUOTE_URL = os.getenv("JUPITER_QUOTE_URL", "https://quote-api.jup.ag/v6/quote")
 JUPITER_SWAP_URL = os.getenv("JUPITER_SWAP_URL", "https://quote-api.jup.ag/v6/swap")
 SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
+# Circle's official mainnet USDC mint -- used only to derive an implied
+# SOL/USD price via a live Jupiter quote (SOL -> USDC), for sizing a real
+# order in SOL terms from a USD cap. Not secret, not user-specific.
+USDC_MINT_ADDRESS = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 # --- Real execution tuning -- only relevant once a human has manually
 # flipped src.wallet.EXECUTION_ENABLED_IN_CODE to True (see that file);

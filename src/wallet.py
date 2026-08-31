@@ -168,6 +168,30 @@ def get_sol_balance_lamports(public_key=None):
     return result["value"]
 
 
+def get_spl_token_balance_raw(owner_public_key, mint_address):
+    """Read-only: the raw (smallest-unit) balance of `mint_address` held
+    by `owner_public_key`, summed across every token account that owner
+    has for this mint (normally just one). Returns 0 if none is found.
+
+    Used to size a real sell as "whatever is actually held right now"
+    rather than separately tracking each SPL token's decimal count --
+    the RPC already returns the amount in the token's own smallest unit,
+    ready to pass straight into a Jupiter quote.
+    """
+    result = _rpc_call(
+        "getTokenAccountsByOwner",
+        [owner_public_key, {"mint": mint_address}, {"encoding": "jsonParsed"}],
+    )
+    total = 0
+    for account in (result or {}).get("value", []):
+        try:
+            amount_str = account["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"]
+            total += int(amount_str)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return total
+
+
 def connection_test():
     """A safe, read-only check: confirms the configured RPC endpoint is
     reachable and, if a public key is configured, that it resolves to a

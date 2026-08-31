@@ -22,6 +22,7 @@ from src.config import (
     REQUEST_RETRY_BACKOFF_SECONDS,
     REQUEST_TIMEOUT_SECONDS,
     SOL_MINT_ADDRESS,
+    USDC_MINT_ADDRESS,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,23 @@ def get_quote(input_mint, output_mint, amount, slippage_bps):
 
     logger.error("Could not get a Jupiter quote for %s -> %s: %s", input_mint, output_mint, last_error)
     return None
+
+
+def get_sol_usd_price():
+    """Best-effort SOL/USD price, implied from a live 1-SOL -> USDC
+    Jupiter quote. Used only to convert a USD position-size cap into a
+    lamport amount for a real order -- not a general price feed. Returns
+    None if a quote cannot be obtained (callers must treat that as
+    "cannot size a real order right now", not retry with a guess).
+    """
+    quote = get_quote(SOL_MINT_ADDRESS, USDC_MINT_ADDRESS, 1_000_000_000, 50)
+    if not quote or not quote.get("outAmount"):
+        return None
+    try:
+        usdc_out = int(quote["outAmount"]) / 1_000_000  # USDC has 6 decimals
+    except (TypeError, ValueError):
+        return None
+    return usdc_out if usdc_out > 0 else None
 
 
 def round_trip_check(token_mint, probe_lamports, slippage_bps):
