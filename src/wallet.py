@@ -27,6 +27,18 @@ HARD CODE-LEVEL SAFETY GATE:
   trigger. It stays False until the live-trading plan has been reviewed
   and explicitly approved.
 
+STATUS: build_and_send_swap() is fully implemented (build via Jupiter,
+sign locally, submit to the configured RPC, poll for confirmation) but
+has never been exercised end to end -- the environment that wrote it has
+no `solders` package installed and no network path to Jupiter/Solana RPC.
+Nothing about EXECUTION_ENABLED_IN_CODE, LIVE_TRADING, or
+CONFIRM_LIVE_TRADING has changed: all three still block it. Before it is
+ever trusted with real funds, a human needs to: install
+requirements-live.txt, configure a real .env locally, and run one real
+swap themselves for a trivial amount (well under $1) -- then verify the
+result against a Solana block explorer -- before flipping
+EXECUTION_ENABLED_IN_CODE.
+
 The `solders` (or `solana`) package is intentionally NOT in
 requirements.txt (the discovery/analysis radar does not need it) -- it is
 listed in requirements-live.txt and only imported lazily, inside the
@@ -34,11 +46,23 @@ functions that need it, so the rest of the project works without it
 installed.
 """
 
+import base64
 import logging
+import time
 
 import requests
 
-from src.config import SOLANA_PRIVATE_KEY, SOLANA_RPC_URL, SOLANA_WALLET_PUBLIC_KEY
+from src.config import (
+    JUPITER_SWAP_URL,
+    REQUEST_MAX_RETRIES,
+    REQUEST_RETRY_BACKOFF_SECONDS,
+    REQUEST_TIMEOUT_SECONDS,
+    SOLANA_PRIVATE_KEY,
+    SOLANA_RPC_URL,
+    SOLANA_WALLET_PUBLIC_KEY,
+    SWAP_CONFIRMATION_POLL_SECONDS,
+    SWAP_CONFIRMATION_TIMEOUT_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +81,13 @@ class WalletDependencyMissing(Exception):
 
 class WalletKeyLooksInvalid(Exception):
     pass
+
+
+class SwapExecutionError(Exception):
+    """Raised when building, signing, sending, or confirming a real swap
+    fails. Never includes the private key or raw signed-transaction bytes
+    in its message.
+    """
 
 
 def _looks_like_seed_phrase(value):
@@ -165,19 +196,155 @@ def connection_test():
     return result
 
 
+def _request_swap_transaction(quote_response, user_public_key, priority_fee_lamports=None):
+    """Ask Jupiter to build an unsigned, ready-to-sign transaction for
+    quote_response. Read/build-only -- does not touch a private key and
+    does not submit anything on-chain, so it is safe to retry on
+    transient failures.
+
+    Returns the transaction as a base64 string (Jupiter's "swapTransaction").
+    """
+    swap_request = {
+        "quoteResponse": quote_response,
+        "userPublicKey": user_public_key,
+        "wrapAndUnwrapSol": True,
+        "dynamicComputeUnitLimit": True,
+        "prioritizationFeeLamports": priority_fee_lamports if priority_fee_lamports is not None else "auto",
+    }
+
+    last_error = None
+    for attempt in range(1, REQUEST_MAX_RETRIES + 1):
+        try:
+            response = requests.post(JUPITER_SWAP_URL, json=swap_request, timeout=REQUEST_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            data = response.json()
+            if not data.get("swapTransaction"):
+                raise SwapExecutionError(f"Jupiter /swap response had no 'swapTransaction' field: {data}")
+            return data["swapTransaction"]
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            last_error = exc
+            logger.warning(
+                "Jupiter /swap request failed on attempt %s/%s: %s", attempt, REQUEST_MAX_RETRIES, exc
+            )
+            if attempt < REQUEST_MAX_RETRIES:
+                time.sleep(REQUEST_RETRY_BACKOFF_SECONDS * attempt)
+
+    raise SwapExecutionError(f"Could not build the swap transaction via Jupiter: {last_error}")
+
+
+def _sign_swap_transaction(swap_transaction_b64, keypair):
+    """Deserialize the unsigned transaction Jupiter returned, sign it
+    locally in memory with `keypair`, and return the signed transaction
+    re-encoded as base64, ready to submit. Never logs the transaction
+    bytes, the signature, or the key.
+    """
+    from solders.transaction import VersionedTransaction  # lazy import, see module docstring
+
+    raw_bytes = base64.b64decode(swap_transaction_b64)
+    unsigned_tx = VersionedTransaction.from_bytes(raw_bytes)
+    signature = keypair.sign_message(bytes(unsigned_tx.message))
+    signed_tx = VersionedTransaction.populate(unsigned_tx.message, [signature])
+    return base64.b64encode(bytes(signed_tx)).decode("ascii")
+
+
+def _send_raw_transaction(signed_tx_b64):
+    """Submit an already-signed transaction to the configured RPC
+    endpoint. This is the one call in this entire module that actually
+    moves funds -- everything before it (quoting, building, signing) is
+    either read-only or purely local. Returns the transaction signature
+    (a public identifier, not secret) on success.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sendTransaction",
+        "params": [signed_tx_b64, {"encoding": "base64", "skipPreflight": False, "maxRetries": 3}],
+    }
+    response = requests.post(SOLANA_RPC_URL, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    data = response.json()
+    if "error" in data:
+        raise SwapExecutionError(f"sendTransaction was rejected by the RPC node: {data['error']}")
+    return data["result"]
+
+
+def _poll_confirmation(signature, timeout_seconds=None, poll_interval_seconds=None):
+    """Poll the RPC endpoint until `signature` is confirmed/finalized,
+    fails on-chain, or the timeout elapses.
+
+    IMPORTANT: timed_out=True does NOT mean the trade failed -- the
+    transaction may already be on-chain and simply not observed yet, or
+    it may land moments later. Always check the signature on a Solana
+    explorer (e.g. https://solscan.io/tx/<signature>) before assuming a
+    timed-out swap did not execute; never blindly retry a whole
+    build_and_send_swap() call after a timeout, since that could send
+    the same trade twice.
+    """
+    timeout_seconds = SWAP_CONFIRMATION_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    poll_interval_seconds = (
+        SWAP_CONFIRMATION_POLL_SECONDS if poll_interval_seconds is None else poll_interval_seconds
+    )
+
+    deadline = time.monotonic() + timeout_seconds
+    last_status = None
+    while time.monotonic() < deadline:
+        try:
+            result = _rpc_call("getSignatureStatuses", [[signature], {"searchTransactionHistory": True}])
+        except Exception as exc:
+            logger.warning("Could not poll confirmation status for %s: %s", signature, exc)
+            time.sleep(poll_interval_seconds)
+            continue
+
+        statuses = (result or {}).get("value") or [None]
+        status = statuses[0]
+        last_status = status
+        if status is not None:
+            if status.get("err"):
+                return {"confirmed": False, "signature": signature, "on_chain_error": status["err"]}
+            confirmation_status = status.get("confirmationStatus")
+            if confirmation_status in ("confirmed", "finalized"):
+                return {"confirmed": True, "signature": signature, "confirmation_status": confirmation_status}
+
+        time.sleep(poll_interval_seconds)
+
+    return {
+        "confirmed": False,
+        "signature": signature,
+        "timed_out": True,
+        "last_status": last_status,
+        "note": (
+            "No confirmation observed within the timeout. This does NOT mean the "
+            "trade failed -- check the signature on a Solana explorer before "
+            "assuming it did not execute, and do not resend the same trade blindly."
+        ),
+    }
+
+
 def build_and_send_swap(quote_response, priority_fee_lamports=None):
     """Build, sign and send a real swap transaction via Jupiter. THIS
     MOVES REAL FUNDS. It is gated by EXECUTION_ENABLED_IN_CODE (module
     constant, see docstring) as well as every check in
     src.kill_switch.trading_allowed() -- callers must check that gate
     themselves before calling this; this function checks the code-level
-    gate itself and refuses regardless of any config.
+    gate itself, first, and refuses regardless of any config.
 
-    Not exercised in this environment: it needs the `solders` package
-    (not installed here) and network access to a Solana RPC endpoint
-    (not reachable from this sandbox). Review and test it against a
-    throwaway wallet with a trivial amount before it is ever used for
-    real, and only after flipping EXECUTION_ENABLED_IN_CODE deliberately.
+    Steps, in order: (1) ask Jupiter to build an unsigned transaction for
+    quote_response, (2) sign it locally in memory with the keypair loaded
+    from SOLANA_PRIVATE_KEY, (3) submit the signed transaction to the
+    configured Solana RPC endpoint, (4) poll for on-chain confirmation.
+
+    Returns a dict: {"signature": str, "confirmed": bool, ...}. Raises
+    SwapExecutionError if a step before submission fails (nothing was
+    sent) -- once _send_raw_transaction() has returned a signature,
+    every subsequent problem is reported in the return value instead of
+    raised, since the trade may already be on-chain at that point.
+
+    NOT exercised end-to-end in the environment that wrote it: doing so
+    needs the `solders` package (not installed there) and network access
+    to Jupiter/Solana RPC (not reachable from that sandbox). Review this
+    function and test it yourself against a trivial amount (a fraction
+    of a dollar) before ever trusting it with a real position, and only
+    after deliberately flipping EXECUTION_ENABLED_IN_CODE to True here.
     """
     if not EXECUTION_ENABLED_IN_CODE:
         raise RuntimeError(
@@ -188,7 +355,7 @@ def build_and_send_swap(quote_response, priority_fee_lamports=None):
         )
 
     try:
-        from solders.transaction import VersionedTransaction  # noqa: F401  (lazy import)
+        import solders  # noqa: F401  (lazy import, see module docstring)
     except ImportError as exc:
         raise WalletDependencyMissing(
             "The 'solders' package is required to send a live swap. "
@@ -196,22 +363,22 @@ def build_and_send_swap(quote_response, priority_fee_lamports=None):
         ) from exc
 
     keypair = load_keypair_from_env()
+    user_public_key = str(keypair.pubkey())
 
-    swap_request = {
-        "quoteResponse": quote_response,
-        "userPublicKey": str(keypair.pubkey()),
-        "wrapAndUnwrapSol": True,
-    }
-    if priority_fee_lamports is not None:
-        swap_request["prioritizationFeeLamports"] = priority_fee_lamports
+    swap_transaction_b64 = _request_swap_transaction(quote_response, user_public_key, priority_fee_lamports)
+    signed_tx_b64 = _sign_swap_transaction(swap_transaction_b64, keypair)
 
-    # The remaining steps (POST to JUPITER_SWAP_URL, deserialize the
-    # returned transaction, sign it with `keypair`, send it via
-    # _rpc_call("sendTransaction", ...), and poll for confirmation) are
-    # intentionally not implemented yet. Wire them up, test thoroughly
-    # against a throwaway wallet with a trivial amount, and only then
-    # consider flipping EXECUTION_ENABLED_IN_CODE.
-    raise NotImplementedError(
-        "Swap sending is scaffolded but not implemented. This is a deliberate "
-        "stopping point -- finish and test it before it can ever run."
-    )
+    # Everything above this line can be retried freely -- nothing has
+    # been submitted to the network yet. Everything from here on cannot:
+    # a network error *after* the RPC node accepts the transaction does
+    # not mean it didn't happen.
+    signature = _send_raw_transaction(signed_tx_b64)
+    logger.warning("Real swap transaction submitted: %s", signature)
+
+    confirmation = _poll_confirmation(signature)
+    result = {"signature": signature, **confirmation}
+    if confirmation.get("confirmed"):
+        logger.warning("Real swap transaction confirmed: %s", signature)
+    else:
+        logger.error("Real swap transaction not confirmed as successful: %s", result)
+    return result

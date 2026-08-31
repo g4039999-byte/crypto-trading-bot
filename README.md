@@ -249,11 +249,19 @@ To start a fresh paper run: `python -c "from src.paper_portfolio import reset_pa
 
 ## Live trading (disabled by default -- read this before changing anything)
 
-A safety layer for real execution has been built, but **real order
-signing/sending is not implemented** -- `src/wallet.py`'s
-`build_and_send_swap()` raises `NotImplementedError` even when its gates
-are open. What exists today only *decides and logs*; nothing places an
-order. This was a deliberate stopping point, not an oversight.
+A safety layer for real execution has been built, and `src/wallet.py`'s
+`build_and_send_swap()` is now **fully implemented** (build the swap via
+Jupiter, sign it locally with your key, submit it, poll for on-chain
+confirmation) -- but it has **never been run end to end**, because the
+environment that wrote it has no `solders` package installed and no
+network path to Jupiter or Solana RPC. It is still hard-refused by
+`EXECUTION_ENABLED_IN_CODE = False` and by `LIVE_TRADING`/
+`CONFIRM_LIVE_TRADING` regardless of that. `live_trader.py`'s automatic
+BUY/SELL cycle still only *decides and logs* -- it does not call
+`build_and_send_swap()` itself. That wiring, and the first real test,
+are the one deliberate stopping point left (see below): they need to
+happen on a machine with real network access, run by you, not
+automatically.
 
 ### What's implemented
 
@@ -265,17 +273,19 @@ order. This was a deliberate stopping point, not an oversight.
 | `portfolio.py` | Position sizing hard-capped at `MAX_TRADE_USD`, never deploys more than `MAX_CAPITAL_DEPLOYMENT_PCT` of `TOTAL_CAPITAL_USD`, one open position at a time by default, stop-loss/take-profit price tracking, daily realized-loss cap. |
 | `live_trader.py` | Combines the above into entry/exit decisions. **Every decision is logged; none is executed.** |
 | `trade_logger.py` | Appends every decision (BUY/SKIP/SELL/BLOCKED + reason) to `data/trade_log.jsonl`. |
-| `wallet.py` | Loads a keypair from `SOLANA_PRIVATE_KEY` (env-only), refuses anything that looks like a pasted seed phrase, and provides a **read-only** `connection_test()` (RPC health + balance, needs only your public address). Real signing/sending is stubbed with `NotImplementedError`, additionally gated by a source-level constant (`EXECUTION_ENABLED_IN_CODE = False`) that env variables cannot override. |
+| `wallet.py` | Loads a keypair from `SOLANA_PRIVATE_KEY` (env-only), refuses anything that looks like a pasted seed phrase, and provides a **read-only** `connection_test()` (RPC health + balance, needs only your public address). `build_and_send_swap()` is fully implemented (build via Jupiter → sign locally → submit → poll for confirmation) but untested end to end, and is additionally gated by a source-level constant (`EXECUTION_ENABLED_IN_CODE = False`) that no env variable can override. |
 
 ### Why nothing has run live yet
 
 1. **This environment cannot reach Solana or Jupiter.** `quote-api.jup.ag`,
    `api.mainnet-beta.solana.com` and `price.jup.ag` are all unreachable
    from the sandbox this was built in (same restriction that blocked
-   DexScreener earlier). The safety logic above is fully unit-tested with
-   mocked responses (53 new tests), but the "connection test" and any
-   real quote/balance check have to be run from a machine with normal
-   internet access -- yours, not this one.
+   DexScreener earlier), and it also has no `solders` package installed.
+   The safety logic and `build_and_send_swap()`'s own orchestration are
+   fully unit-tested with mocked network/signing calls (67 tests across
+   the live-trading safety layer), but the "connection test", any real
+   quote, and a real signed transaction have to be run from a machine
+   with normal internet access -- yours, not this one.
 2. **No private key has been provided, and none should be pasted here.**
    A seed phrase or private key typed into any chat -- this one included
    -- should be treated as compromised the moment it's typed. Real
@@ -317,30 +327,42 @@ order. This was a deliberate stopping point, not an oversight.
 
 ### What real execution still needs, before it can run even once
 
-1. Run `wallet.connection_test()` for real, on a machine with internet
-   access, using only the public address -- confirms the RPC endpoint
-   and wallet resolve correctly.
-2. Implement and test `wallet.build_and_send_swap()` (currently a stub)
-   against a **throwaway wallet with a trivial amount** -- not the $24
-   wallet -- until it reliably builds, signs and confirms a transaction.
-3. `pip install -r requirements-live.txt` (adds `solders`; not needed for
-   anything else in this project).
-4. Only after 1-3, and only by deliberately editing
-   `src/wallet.py`'s `EXECUTION_ENABLED_IN_CODE` to `True` (a source
-   change, not an env setting) plus setting `LIVE_TRADING=true` and the
-   exact `CONFIRM_LIVE_TRADING` phrase in a local `.env` -- all three at
-   once -- would a real order ever be sent.
+1. `pip install -r requirements-live.txt` (adds `solders`; not needed for
+   anything else in this project) on a machine with real internet access
+   -- yours, not the sandbox this was built in.
+2. Set `SOLANA_WALLET_PUBLIC_KEY` in a **local** `.env` and run
+   `wallet.connection_test()` for real -- confirms the RPC endpoint and
+   wallet resolve correctly, with no private key involved at all.
+3. **Test `build_and_send_swap()` yourself, against a throwaway wallet
+   holding a trivial amount (well under $1) -- never the $24 wallet, and
+   never through an AI assistant.** It has been implemented and unit
+   tested with mocked network/signing calls (14 new tests), but every
+   real on-chain behavior -- does the transaction actually land, is the
+   confirmation logic right, is the fee reasonable -- is unverified until
+   you watch one succeed on a block explorer (e.g. solscan.io) with your
+   own eyes.
+4. Wire the actual call: today `live_trader.run_live_cycle()` decides and
+   logs a BUY/SELL but does not call `wallet.build_and_send_swap()` --
+   that connection is deliberately not made yet, so a BUY/SELL decision
+   currently just updates `data/positions.json`'s bookkeeping, exactly
+   like paper trading. Add that call once step 3 has passed repeatedly.
+5. Only after 1-4, and only by deliberately editing `src/wallet.py`'s
+   `EXECUTION_ENABLED_IN_CODE` to `True` (a source change, not an env
+   setting) plus setting `LIVE_TRADING=true` and the exact
+   `CONFIRM_LIVE_TRADING` phrase in a local `.env` -- all three at once
+   -- would a real order ever be sent.
 
 None of that has been done. No real trade has been placed, and none will
-be without those explicit steps.
+be without those explicit steps -- each of which requires you, personally,
+on your own machine, not an automated or unattended process.
 
 ## What's next
 
 - Run `python -m src.radar --loop --paper` for a real stretch of time to
   build an actual paper track record before considering live trading.
-- Implement and test `wallet.build_and_send_swap()` against a throwaway
-  wallet (see above) -- the only piece standing between this and real
-  execution.
+- Test `wallet.build_and_send_swap()` yourself against a throwaway wallet
+  (see above), then wire it into `live_trader.run_live_cycle()` -- the two
+  remaining pieces standing between this and real execution.
 - `live_trader.run_live_cycle()` still expects a `{token_address: price}`
   map for exit checks to be supplied by the caller (paper_trader.py
   already derives this from each cycle's radar results -- the live path

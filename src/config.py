@@ -186,3 +186,11 @@ SOLANA_PRIVATE_KEY = os.getenv("SOLANA_PRIVATE_KEY", "")
 JUPITER_QUOTE_URL = os.getenv("JUPITER_QUOTE_URL", "https://quote-api.jup.ag/v6/quote")
 JUPITER_SWAP_URL = os.getenv("JUPITER_SWAP_URL", "https://quote-api.jup.ag/v6/swap")
 SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
+
+# --- Real execution tuning -- only relevant once a human has manually
+# flipped src.wallet.EXECUTION_ENABLED_IN_CODE to True (see that file);
+# these have no effect before then. ---
+# How long to wait for on-chain confirmation after sending a real swap
+# before giving up and returning a "timed_out" (not "failed") result.
+SWAP_CONFIRMATION_TIMEOUT_SECONDS = _get_float("SWAP_CONFIRMATION_TIMEOUT_SECONDS", 60)
+SWAP_CONFIRMATION_POLL_SECONDS = _get_float("SWAP_CONFIRMATION_POLL_SECONDS", 2)
