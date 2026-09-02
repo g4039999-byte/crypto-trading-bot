@@ -34,6 +34,7 @@ from src.scoring import calculate_score
 from src.snapshot import known_addresses, save_snapshot
 from src.stage import classify_stage
 from src.utils import safe_get
+from src.opportunity_watchlist import update_from_results, attach_news_signals
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,17 @@ def run_radar():
             results.append(result)
 
     results.sort(key=lambda item: item["score"], reverse=True)
+
+    try:
+        update_from_results(results)
+    except Exception:
+        logger.exception("Opportunity watchlist update failed")
+
+    try:
+        attach_news_signals(results)
+    except Exception:
+        logger.exception("News signal attachment failed")
+
     return results
 
 
