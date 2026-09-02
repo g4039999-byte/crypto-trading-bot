@@ -13,3 +13,10 @@ data/STOP_TRADING
 # the (still unused) live-trading files above.
 data/paper_positions.json
 data/paper_trade_log.jsonl
+
+# Radar observation runtime state -- rewritten every radar cycle by any
+# running `python -m src.radar --loop` process, so it changes constantly
+# and adds no real history to git. Same reasoning as the runtime state
+# above; never contains secrets.
+data/snapshots.json
+data/opportunity_watchlist.json
