@@ -289,10 +289,18 @@ class TestBuildAndSendSwapFullPipeline(unittest.TestCase):
         self.assertEqual(result["signature"], "Sig111")
 
     def test_raises_dependency_missing_when_solders_is_not_installed(self):
-        # In the environment these tests run in, solders genuinely is not
-        # installed -- this exercises the real ImportError path.
-        self.assertNotIn("solders", sys.modules)
-        with mock.patch.object(wallet, "EXECUTION_ENABLED_IN_CODE", True):
+        # Simulate solders being unavailable regardless of whether it's
+        # actually installed in the environment running these tests.
+        # Setting sys.modules['solders'] = None makes Python's import
+        # system raise ImportError for `import solders` (documented
+        # CPython behavior), exactly as if the package were genuinely
+        # missing -- so this test stays deterministic and isolated from
+        # whatever happens to be installed locally (e.g. after
+        # `pip install -r requirements-live.txt`), instead of depending
+        # on the package's real absence.
+        with mock.patch.dict(sys.modules, {"solders": None}), mock.patch.object(
+            wallet, "EXECUTION_ENABLED_IN_CODE", True
+        ):
             with self.assertRaises(wallet.WalletDependencyMissing):
                 wallet.build_and_send_swap({"outAmount": "1"})
 
