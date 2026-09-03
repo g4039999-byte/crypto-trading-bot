@@ -297,6 +297,53 @@ considering live trading.
 To start a fresh paper run: `python -c "from src.paper_portfolio import reset_paper_state; reset_paper_state()"`
 (only ever touches `data/paper_positions.json`).
 
+## X (Twitter) social intelligence -- optional, additive, off by default
+
+`src/x_intelligence.py` is the radar's only import point for six small
+modules that turn X posts into an extra, *never-required* scoring
+signal:
+
+| Module | Job |
+|---|---|
+| `x_client.py` | Talks to X API v2's recent-search endpoint. Zero network calls, zero cost, unless `X_BEARER_TOKEN` is set. Retries with backoff, honors 429 rate-limit reset headers (capped wait), and enforces a hard daily read budget (`X_MAX_READS_PER_DAY`, `data/x_usage.json`). |
+| `x_signal_engine.py` | Extracts cashtags/hashtags/meme-context tickers from post text, clusters them into per-entity trend state (`data/x_signals.json`), computes independent-mention velocity, and flags spam-shaped text. |
+| `x_account_reputation.py` | Learns a per-account weight (`data/x_account_reputation.json`) purely from outcomes -- not follower count -- via EMA smoothing so recent results matter more than old ones. |
+| `x_correlation.py` | Fuzzy-matches an entity to a real radar-known token by symbol (stdlib `difflib`), and flags a near-identical symbol as a possible clone when an older/more-liquid "original" exists. |
+| `x_intelligence.py` | Orchestrates the above once per radar cycle (rate-limited to `X_POLL_INTERVAL_SECONDS`, independent of the radar's own faster loop) and is the hard resilience boundary: every function here catches everything and degrades to "no signal" rather than ever raising into `radar.py`. |
+
+**Why off by default:** as of 2026, X's API has no free tier for a new
+project -- reads are billed pay-per-use (~$0.005/post) or via a legacy
+$200+/month subscription. Nothing in this project has ever set
+`X_BEARER_TOKEN` or spent anything against a real X account. Leave it
+empty and every X-related function above no-ops immediately.
+
+**How it plugs into scoring, never as a gate:** `radar.run_radar()`
+correlates each cycle's results against active X trend clusters
+(`_apply_x_social_signals()`) and adds a bounded points bonus
+(`X_SCORE_MAX_BONUS`, default 10) on top of the market-data score --
+`src/scoring.calculate_score()`'s new `social_bonus` parameter defaults
+to 0, so a token with no X signal (or X not configured at all) scores
+exactly as it always has. A signal flagged as a possible clone
+contributes zero bonus. Every result carries `x_trend_detected`,
+`x_entity`, `social_velocity`, `source_quality`, `independent_mentions`,
+`social_confidence`, `possible_clone` -- shown on the dashboard's
+opportunity cards, and recorded into `data/opportunity_watchlist.json`'s
+history the same way the existing momentum signals are.
+
+**Closing the learning loop:** when `src.paper_trader` opens a position
+whose token correlated to an X entity, the position remembers that
+entity; when the position closes, every account that contributed a
+mention gets `x_account_reputation.record_outcome()`'d with whether the
+trade won or lost -- see `scripts/backtest_x_signals.py` for a
+synthetic-scenario replay proving that mechanism actually rewards
+consistently-useful accounts over noisy/spam ones (no real historical X
+data exists yet to replay for real; this validates the *mechanism*, not
+a specific account's track record).
+
+```bash
+python -m scripts.backtest_x_signals   # synthetic reputation-learning replay
+```
+
 ## Live trading (disabled by default -- read this before changing anything)
 
 A safety layer for real execution has been built. `src/wallet.py`'s

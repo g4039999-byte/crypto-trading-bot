@@ -35,6 +35,7 @@ from src.snapshot import known_addresses, save_snapshot
 from src.stage import classify_stage
 from src.utils import safe_get
 from src.opportunity_watchlist import update_from_results, attach_news_signals
+from src import x_intelligence
 
 logger = logging.getLogger(__name__)
 
@@ -113,11 +114,68 @@ def evaluate_pair(pair):
             "address": address,
             "price_usd": price_usd,
             "trend": observation.get("status") if observation.get("status") != "OK" else observation.get("trend"),
+            # X social intelligence defaults -- filled in by run_radar()'s
+            # own pass below when a signal correlates to this token.
+            # Always present so every result has the same shape whether
+            # or not X is configured at all.
+            "x_trend_detected": False,
+            "x_entity": None,
+            "social_velocity": 0.0,
+            "source_quality": None,
+            "independent_mentions": 0,
+            "social_confidence": 0.0,
+            "social_score_bonus": 0,
+            "possible_clone": False,
         }
     except Exception:
         # Defensive backstop: one bad pair should never abort the run.
         logger.exception("Unexpected error while evaluating a pair (symbol lookup failed too) -- skipping it")
         return None
+
+
+def _apply_x_social_signals(results):
+    """Correlate this cycle's results against any active X trend
+    clusters and add a bounded score bonus where one matches (see
+    src.x_intelligence -- X is never a gate, only ever an addition on
+    top of a token's own market-data score). A token Radar found with
+    no X signal is completely unaffected; a strong X trend with no
+    matching token yet simply keeps accumulating mentions until one
+    appears (src.x_signal_engine's TTL-based state persists across
+    cycles on its own).
+
+    Hard resilience boundary: X being unconfigured, down, or erroring
+    must never affect radar/paper-trading results -- every exception
+    here is caught and logged, leaving every result's x_* defaults
+    (set in evaluate_pair()) untouched, exactly as if this call had
+    never happened.
+    """
+    try:
+        x_intelligence.maybe_poll_and_update()
+        trend_summaries = x_intelligence.get_active_trends()
+        if not trend_summaries:
+            return
+
+        candidate_tokens = [
+            {"symbol": r["symbol"], "address": r["address"], "liquidity": r["liquidity"], "age": r["age"]}
+            for r in results
+        ]
+        for result in results:
+            signal = x_intelligence.social_signal_for_token(result["address"], candidate_tokens, trend_summaries)
+            if not signal:
+                continue
+            bonus = x_intelligence.score_bonus_for_signal(signal)
+            result["x_trend_detected"] = True
+            result["x_entity"] = signal["entity"]
+            result["social_velocity"] = signal["velocity_per_minute"]
+            result["source_quality"] = signal["source_quality"]
+            result["independent_mentions"] = signal["independent_mentions"]
+            result["social_confidence"] = signal["confidence"]
+            result["social_score_bonus"] = bonus
+            result["possible_clone"] = signal["is_possible_clone"]
+            if bonus:
+                result["score"] = max(0, min(100, result["score"] + bonus))
+    except Exception:
+        logger.exception("X social-signal correlation failed this cycle -- continuing with market-only scores")
 
 
 def run_radar():
@@ -160,6 +218,8 @@ def run_radar():
         result = evaluate_pair(pair)
         if result is not None:
             results.append(result)
+
+    _apply_x_social_signals(results)
 
     results.sort(key=lambda item: item["score"], reverse=True)
 

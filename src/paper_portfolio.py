@@ -113,13 +113,17 @@ def open_position(
     *,
     entry_score=None, entry_trend=None, entry_reason=None,
     entry_age_minutes=None, discovery_to_entry_seconds=None,
+    x_entity=None,
 ):
-    """The entry_* / discovery_to_entry_seconds kwargs are optional
-    context recorded onto the position purely for later analysis (shown
-    in the dashboard, and carried through into closed_trades by
-    close_position() below, which spreads every field of the position
-    it closes) -- src/paper_trader.py is what actually computes and
-    passes them; nothing here requires them.
+    """The entry_* / discovery_to_entry_seconds / x_entity kwargs are
+    optional context recorded onto the position purely for later
+    analysis (shown in the dashboard, and carried through into
+    closed_trades by close_position() below, which spreads every field
+    of the position it closes) -- src/paper_trader.py is what actually
+    computes and passes them; nothing here requires them. x_entity (the
+    X trend/meme entity this token correlated to at entry, if any) is
+    what lets src/paper_trader.py close the learning loop in
+    src.x_account_reputation once this trade's outcome is known.
     """
     if entry_price_usd <= 0:
         raise ValueError("entry_price_usd must be positive")
@@ -140,6 +144,7 @@ def open_position(
         "entry_trend": entry_trend,
         "entry_reason": entry_reason,
         "entry_age_minutes": entry_age_minutes,
+        "x_entity": x_entity,
         "discovery_to_entry_seconds": discovery_to_entry_seconds,
     }
 

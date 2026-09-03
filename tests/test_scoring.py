@@ -49,6 +49,18 @@ class TestCalculateScore(unittest.TestCase):
     def test_non_dict_pair_does_not_raise(self):
         self.assertEqual(calculate_score(None), 0)
 
+    def test_social_bonus_defaults_to_zero_no_change_for_existing_callers(self):
+        pair = make_pair()
+        self.assertEqual(calculate_score(pair), calculate_score(pair, social_bonus=0))
+
+    def test_social_bonus_adds_on_top_of_the_market_data_score(self):
+        pair = make_pair()
+        self.assertEqual(calculate_score(pair, social_bonus=7), calculate_score(pair) + 7)
+
+    def test_social_bonus_never_pushes_score_above_100(self):
+        pair = make_pair(liquidity=1_000_000, volume_h24=10_000_000, buys=1000, sells=1, change_h24=50)
+        self.assertLessEqual(calculate_score(pair, social_bonus=50), 100)
+
 
 if __name__ == "__main__":
     unittest.main()

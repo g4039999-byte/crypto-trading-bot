@@ -31,3 +31,13 @@ data/webapp_radar.pid
 # output (like the runtime state above), not source. Regenerate with
 # `python -m scripts.strategy_registry record <preset>`.
 data/strategy_versions.json
+
+# X (Twitter) social-intelligence runtime state -- src/x_intelligence.py
+# and friends. Local-machine-only, regenerated as the radar polls (if
+# X_BEARER_TOKEN is even configured -- it isn't, by default), never
+# contains secrets (the token itself lives only in .env, already
+# ignored above).
+data/x_signals.json
+data/x_account_reputation.json
+data/x_usage.json
+data/x_poll_state.json

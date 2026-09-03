@@ -3,7 +3,7 @@ import time
 from src.utils import safe_get
 
 
-def calculate_score(pair, age_minutes=None):
+def calculate_score(pair, age_minutes=None, social_bonus=0):
     """Score 0-100 based on liquidity, volume, buy pressure, momentum and
     pair age. Defensive against missing/null fields -- returns 0 when
     there isn't enough data (no liquidity or volume figure) to score.
@@ -14,6 +14,13 @@ def calculate_score(pair, age_minutes=None):
     scripts/backtest_paper_strategy.py replays old snapshots, where
     "now" must be the snapshot's own timestamp, not whenever the replay
     happens to run.
+
+    social_bonus (default 0, i.e. no change in behavior for any
+    existing caller) is an additive points bonus from X social signal
+    strength -- see src.x_intelligence.score_bonus_for_signal(). It is
+    added on top of the market-data score below, never a substitute for
+    it: a token with social_bonus=0 (no X signal, or X not configured
+    at all) is scored exactly as it always has been.
     """
     if not isinstance(pair, dict):
         return 0
@@ -91,5 +98,7 @@ def calculate_score(pair, age_minutes=None):
 
         elif age_minutes <= 60 and liquidity >= 5000:
             score += 5
+
+    score += social_bonus
 
     return max(0, min(score, 100))

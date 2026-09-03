@@ -138,6 +138,57 @@ class TestRadarIntegration(unittest.TestCase):
         self.assertNotEqual(good_result["trend"], "INSUFFICIENT_DATA")
         self.assertIn(good_result["trend"], ("STRONG", "RISING", "NEUTRAL", "WEAK"))
 
+    def test_results_have_x_defaults_when_x_is_not_configured(self):
+        with mock.patch("src.radar.fetch_solana_token_addresses", return_value=["addr-good"]), \
+                mock.patch("src.radar.fetch_pairs", return_value=[FIXTURE_PAIRS[0]]):
+            results = radar.run_radar()
+
+        good = next(r for r in results if r["symbol"] == "GOOD")
+        self.assertFalse(good["x_trend_detected"])
+        self.assertEqual(good["social_score_bonus"], 0)
+        self.assertFalse(good["possible_clone"])
+
+    def test_x_signal_correlation_adds_a_bonus_and_never_required(self):
+        fake_signal = {"entity": "GOOD", "confidence": 0.8, "independent_mentions": 4,
+                        "velocity_per_minute": 1.5, "source_quality": 1.2, "is_possible_clone": False}
+        with mock.patch("src.radar.fetch_solana_token_addresses", return_value=["addr-good"]), \
+                mock.patch("src.radar.fetch_pairs", return_value=[FIXTURE_PAIRS[0]]), \
+                mock.patch.object(radar.x_intelligence, "maybe_poll_and_update", return_value=1), \
+                mock.patch.object(radar.x_intelligence, "get_active_trends", return_value=[{"entity": "GOOD"}]), \
+                mock.patch.object(radar.x_intelligence, "social_signal_for_token", return_value=fake_signal):
+            with_signal = radar.run_radar()
+
+        good = next(r for r in with_signal if r["symbol"] == "GOOD")
+        self.assertTrue(good["x_trend_detected"])
+        self.assertGreater(good["social_score_bonus"], 0)
+
+        # Same fixture, no X signal at all -- still evaluates and scores
+        # the token; X is additive, never a gate.
+        with mock.patch("src.radar.fetch_solana_token_addresses", return_value=["addr-good"]), \
+                mock.patch("src.radar.fetch_pairs", return_value=[FIXTURE_PAIRS[0]]):
+            without_signal = radar.run_radar()
+
+        good_no_signal = next(r for r in without_signal if r["symbol"] == "GOOD")
+        self.assertTrue(good_no_signal["ok"])
+        self.assertEqual(good_no_signal["social_score_bonus"], 0)
+
+    def test_run_radar_survives_x_intelligence_raising_entirely(self):
+        """The core resilience guarantee: if every X-related call
+        explodes, run_radar() must still return normal results, not
+        crash the whole radar/paper-trading cycle.
+        """
+        with mock.patch("src.radar.fetch_solana_token_addresses", return_value=["addr-good"]), \
+                mock.patch("src.radar.fetch_pairs", return_value=[FIXTURE_PAIRS[0]]), \
+                mock.patch.object(radar.x_intelligence, "maybe_poll_and_update", side_effect=RuntimeError("X is on fire")), \
+                mock.patch.object(radar.x_intelligence, "get_active_trends", side_effect=RuntimeError("X is on fire")):
+            results = radar.run_radar()
+
+        self.assertEqual(len(results), 1)
+        good = results[0]
+        self.assertEqual(good["symbol"], "GOOD")
+        self.assertTrue(good["ok"])
+        self.assertFalse(good["x_trend_detected"])
+
 
 if __name__ == "__main__":
     unittest.main()

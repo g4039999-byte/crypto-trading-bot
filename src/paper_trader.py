@@ -49,6 +49,7 @@ from src.paper_portfolio import (
 )
 from src.risk import assess_token_safety
 from src.snapshot import load_snapshots
+from src import x_intelligence
 
 logger = logging.getLogger(__name__)
 
@@ -199,22 +200,26 @@ def evaluate_entry(evaluated_pair, probe_check=None):
 
     age_minutes = evaluated_pair.get("age")
     discovery_to_entry_seconds = _discovery_to_entry_seconds(address)
+    x_entity = evaluated_pair.get("x_entity") if evaluated_pair.get("x_trend_detected") else None
 
     reason = (
         f"score {score}>={PAPER_MIN_SCORE}, trend {trend}, "
         f"liquidity/volume/age/sellability screening passed (paper)"
     )
+    if x_entity:
+        reason += f", X signal: {x_entity} (confidence {evaluated_pair.get('social_confidence', 0):.2f})"
     log_decision(
         "BUY", symbol, address, reason,
         extra={
             "score": score, "trend": trend, "size_usd": size_usd,
             "age_minutes": age_minutes, "discovery_to_entry_seconds": discovery_to_entry_seconds,
+            "x_entity": x_entity,
         },
     )
     return {
         "action": "BUY", "reason": reason, "size_usd": size_usd,
         "entry_score": score, "entry_trend": trend, "entry_age_minutes": age_minutes,
-        "discovery_to_entry_seconds": discovery_to_entry_seconds,
+        "discovery_to_entry_seconds": discovery_to_entry_seconds, "x_entity": x_entity,
     }
 
 
@@ -257,6 +262,31 @@ def _skip_reason_bucket(reason):
     return "other"
 
 
+def _record_x_learning_outcome(close_result):
+    """After a position closes, if it was opened on the strength of an
+    X signal (position["x_entity"] set at open time), feed the outcome
+    back to every contributing account's reputation
+    (src.x_intelligence.record_trade_outcome_for_entity) -- this is the
+    actual learning step: "was this account's signal followed by a
+    real, profitable move, or not". Never raises; a learning-update
+    failure must never affect the trade that already closed.
+    """
+    if not close_result:
+        return
+    position = close_result.get("position") or {}
+    entity = position.get("x_entity")
+    if not entity:
+        return
+    pnl_usd = close_result.get("pnl_usd") or 0.0
+    try:
+        x_intelligence.record_trade_outcome_for_entity(
+            entity, was_useful=(pnl_usd > 0),
+            context={"symbol": position.get("symbol"), "pnl_usd": round(pnl_usd, 2)},
+        )
+    except Exception:
+        logger.exception("Failed to record X learning outcome for entity %r -- non-fatal", entity)
+
+
 def run_paper_cycle(evaluated_pairs):
     """One pass over the radar's results: check every open paper position
     for an exit (using each pair's current price_usd when available),
@@ -289,8 +319,9 @@ def run_paper_cycle(evaluated_pairs):
         exit_decision = evaluate_exit(position, price)
         decisions.append(exit_decision)
         if exit_decision["action"] == "SELL":
-            close_position(position["token_address"], price, exit_decision["reason"])
+            close_result = close_position(position["token_address"], price, exit_decision["reason"])
             closed_this_cycle.add(position["token_address"])
+            _record_x_learning_outcome(close_result)
 
     for pair in evaluated_pairs:
         if pair.get("address") in closed_this_cycle:
@@ -305,6 +336,7 @@ def run_paper_cycle(evaluated_pairs):
                 entry_reason=entry_decision.get("reason"),
                 entry_age_minutes=entry_decision.get("entry_age_minutes"),
                 discovery_to_entry_seconds=entry_decision.get("discovery_to_entry_seconds"),
+                x_entity=entry_decision.get("x_entity"),
             )
 
     buys = sum(1 for d in decisions if d["action"] == "BUY")

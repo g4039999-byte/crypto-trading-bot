@@ -348,6 +348,7 @@ def build_status():
     for entry in ranked[:6]:
         latest = _latest_history(entry)
         trend = latest.get("trend")
+        x_signal = latest.get("x_signal")
         top_opportunities.append({
             "symbol": entry.get("symbol") or "?",
             "address_short": _short_address(entry.get("address")),
@@ -355,6 +356,10 @@ def build_status():
             "score": latest.get("score"),
             "trend": _TREND_LABELS.get(trend, trend or "غير متاح"),
             "news_count": len(entry.get("news") or []),
+            "x_entity": x_signal.get("entity") if x_signal else None,
+            "x_confidence": x_signal.get("confidence") if x_signal else None,
+            "x_mentions": x_signal.get("independent_mentions") if x_signal else None,
+            "x_possible_clone": bool(x_signal.get("is_possible_clone")) if x_signal else False,
         })
 
     last_update = None

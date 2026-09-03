@@ -162,7 +162,7 @@ def _classify_active(score, trend, ok):
 
 def _history_entry(now, score, base_score, momentum_score, trend, stage, status,
                     buy_sell_pressure=None, volume_momentum=None, price_acceleration=None,
-                    persistence_streak=None):
+                    persistence_streak=None, x_signal=None):
     return {
         "timestamp": now.isoformat(),
         "score": score,
@@ -179,11 +179,17 @@ def _history_entry(now, score, base_score, momentum_score, trend, stage, status,
         "volume_momentum": volume_momentum,
         "price_acceleration": price_acceleration,
         "persistence_streak": persistence_streak,
+        # X social intelligence (src.x_intelligence, via radar.py's own
+        # result dict) -- same "purely recorded, never used in status
+        # classification" rule as the signals above. x_signal is None
+        # when no X trend correlated to this token this cycle.
+        "x_signal": x_signal,
     }
 
 
 def update_one(state, *, address, symbol, score, base_score, momentum_score, trend, stage, ok, now=None,
-                buy_sell_pressure=None, volume_momentum=None, price_acceleration=None, persistence_streak=None):
+                buy_sell_pressure=None, volume_momentum=None, price_acceleration=None, persistence_streak=None,
+                x_signal=None):
     """Update (or create) the watchlist entry for one address from one
     radar result. Mutates and returns `state` in place -- callers batch
     many of these into a single load/save_state() pair (see
@@ -191,10 +197,13 @@ def update_one(state, *, address, symbol, score, base_score, momentum_score, tre
 
     buy_sell_pressure/volume_momentum/price_acceleration/persistence_streak
     are the optional src.momentum_signals fields (see radar.evaluate_pair()'s
-    "signals" dict) -- purely recorded into this entry's history, same as
-    score/trend/momentum already are. They play no part in the
-    NEW/WATCHING/QUALIFIED/REJECTED classification below, which is
-    unchanged from before these existed.
+    "signals" dict); x_signal is the optional X social-intelligence dict
+    (entity/confidence/velocity/is_possible_clone -- update_from_results()
+    below builds it from radar.evaluate_pair()'s flat x_trend_detected/
+    x_entity/social_* fields). Both are purely recorded into this entry's
+    history, same as score/trend/momentum already are. They play no part
+    in the NEW/WATCHING/QUALIFIED/REJECTED classification below, which is
+    unchanged from before either existed.
 
     A malformed/placeholder address ("?" or falsy) is a no-op: it can't
     identify a real opportunity to track.
@@ -231,6 +240,7 @@ def update_one(state, *, address, symbol, score, base_score, momentum_score, tre
         now, score, base_score, momentum_score, trend, stage, status,
         buy_sell_pressure=buy_sell_pressure, volume_momentum=volume_momentum,
         price_acceleration=price_acceleration, persistence_streak=persistence_streak,
+        x_signal=x_signal,
     ))
     entry["history"] = entry["history"][-OPPORTUNITY_HISTORY_LIMIT:]
 
@@ -298,6 +308,17 @@ def update_from_results(results, now=None):
             signals = item.get("signals") or {}
             if not isinstance(signals, dict):
                 signals = {}
+            x_signal = None
+            if item.get("x_trend_detected"):
+                x_signal = {
+                    "entity": item.get("x_entity"),
+                    "confidence": item.get("social_confidence"),
+                    "velocity_per_minute": item.get("social_velocity"),
+                    "source_quality": item.get("source_quality"),
+                    "independent_mentions": item.get("independent_mentions"),
+                    "score_bonus": item.get("social_score_bonus"),
+                    "is_possible_clone": item.get("possible_clone"),
+                }
             update_one(
                 state,
                 address=address,
@@ -313,6 +334,7 @@ def update_from_results(results, now=None):
                 volume_momentum=signals.get("volume_momentum"),
                 price_acceleration=signals.get("price_acceleration"),
                 persistence_streak=signals.get("persistence_streak"),
+                x_signal=x_signal,
             )
 
         _apply_expiry(state, touched, now=now)

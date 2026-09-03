@@ -306,3 +306,88 @@ USDC_MINT_ADDRESS = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 # before giving up and returning a "timed_out" (not "failed") result.
 SWAP_CONFIRMATION_TIMEOUT_SECONDS = _get_float("SWAP_CONFIRMATION_TIMEOUT_SECONDS", 60)
 SWAP_CONFIRMATION_POLL_SECONDS = _get_float("SWAP_CONFIRMATION_POLL_SECONDS", 2)
+
+
+# =============================================================================
+# X (Twitter) social intelligence -- optional, additive, and OFF unless a
+# bearer token is explicitly configured. Read this before setting X_BEARER_
+# TOKEN: as of 2026, X's API has no free tier for a new project -- reads
+# are billed pay-per-use (~$0.005/post, or a legacy $200+/month
+# subscription for accounts that already had one). This module makes zero
+# network calls and costs nothing until X_BEARER_TOKEN is set; nothing in
+# this project has ever set it or spent anything against a real X account.
+# X_BEARER_TOKEN must NEVER be committed, logged, printed, or pasted into
+# a chat -- it is read from the environment only, exactly like
+# SOLANA_PRIVATE_KEY above.
+# =============================================================================
+
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "")
+
+# Explicit override; normally left unset so "enabled" just means "a
+# bearer token is configured" (see src/x_client.py's is_configured()).
+# Set to false to keep the token configured but the feature off.
+X_ENABLED = _get_bool("X_ENABLED", True)
+
+X_API_BASE_URL = os.getenv("X_API_BASE_URL", "https://api.x.com/2")
+X_REQUEST_TIMEOUT_SECONDS = _get_float("X_REQUEST_TIMEOUT_SECONDS", 10)
+X_REQUEST_MAX_RETRIES = _get_int("X_REQUEST_MAX_RETRIES", 3)
+X_REQUEST_RETRY_BACKOFF_SECONDS = _get_float("X_REQUEST_RETRY_BACKOFF_SECONDS", 2.0)
+# Cap on how long a single call will sleep for a rate-limit (429) reset
+# before giving up on *this* cycle -- long enough to ride out a normal
+# 15-minute window's reset without hammering it, short enough to never
+# stall the radar loop for an entire cycle. It always retries again
+# next cycle regardless -- see src/x_intelligence.py.
+X_RATE_LIMIT_MAX_WAIT_SECONDS = _get_float("X_RATE_LIMIT_MAX_WAIT_SECONDS", 30.0)
+
+# Hard daily spending guard, in number of post-reads (data/x_usage.json
+# tracks the running total per UTC day). At the pay-per-use rate above,
+# 500 reads/day is roughly $2.50/day worst case. Sized deliberately low
+# by default -- raise it deliberately, knowing the real cost, not by
+# accident. Once hit, X calls short-circuit to "no signal" for the rest
+# of the day and resume automatically at UTC midnight.
+X_MAX_READS_PER_DAY = _get_int("X_MAX_READS_PER_DAY", 500)
+
+# How often the radar polls X for new signals -- deliberately much
+# slower than RADAR_LOOP_INTERVAL_SECONDS itself (a search call is
+# billed per post *returned*, not per call, but polling every radar
+# cycle would still burn through X_MAX_READS_PER_DAY in minutes for no
+# real benefit -- meme velocity is measured in minutes, not seconds).
+X_POLL_INTERVAL_SECONDS = _get_float("X_POLL_INTERVAL_SECONDS", 300.0)
+X_MAX_RESULTS_PER_QUERY = _get_int("X_MAX_RESULTS_PER_QUERY", 30)
+
+# What to search for -- crypto/meme-coin-relevant terms. Comma-separated;
+# each is one billed search (each returning up to X_MAX_RESULTS_PER_QUERY
+# reads), run once per X_POLL_INTERVAL_SECONDS.
+X_SEARCH_QUERIES = tuple(
+    q.strip() for q in os.getenv(
+        "X_SEARCH_QUERIES",
+        "solana meme coin,new solana gem,$SOL pump,solana launch"
+    ).split(",") if q.strip()
+)
+
+# A trend cluster needs at least this many *independent* authors
+# mentioning it before it is considered a real signal rather than noise
+# from a single account (which could be one spammer, not a trend).
+X_MIN_INDEPENDENT_MENTIONS = _get_int("X_MIN_INDEPENDENT_MENTIONS", 2)
+
+# How long a detected trend cluster stays "active" (eligible to
+# correlate with a token and contribute to scoring) without a fresh
+# mention -- memes move fast; a cluster that has gone quiet this long is
+# stale, not a live signal.
+X_SIGNAL_TTL_MINUTES = _get_float("X_SIGNAL_TTL_MINUTES", 60.0)
+
+# Upper bound on how many points a strong X signal can add to a token's
+# score (src/scoring.calculate_score's social_bonus parameter) -- an
+# addition on top of the market-data score, never a substitute for it,
+# and never a gate: a token with zero X signal is scored exactly as
+# before this feature existed.
+X_SCORE_MAX_BONUS = _get_int("X_SCORE_MAX_BONUS", 10)
+
+# Two entity names within this difflib.SequenceMatcher similarity (0-1,
+# see src/x_correlation.py) are treated as "suspiciously similar" for
+# clone detection -- e.g. "$PEPITO" vs "$PEPIT0" (an O/0 swap, a classic
+# typosquat) trying to ride an existing symbol's wave. 0.8: chosen so a
+# single-character homoglyph swap on a 5-6 char symbol (ratio ~0.8-0.83)
+# is caught, while genuinely unrelated symbols (ratio well under 0.3 in
+# practice) are not.
+X_CLONE_SYMBOL_SIMILARITY_THRESHOLD = _get_float("X_CLONE_SYMBOL_SIMILARITY_THRESHOLD", 0.8)

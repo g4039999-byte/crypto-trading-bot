@@ -16,10 +16,12 @@ import src.snapshot as snapshot
 SELLABLE = {"sellable": True, "reason": None, "round_trip_loss_pct": 2.0}
 
 
-def make_pair(score=90, trend="STRONG", price_usd=1.0, address="addr-1", symbol="GOOD", age=20):
+def make_pair(score=90, trend="STRONG", price_usd=1.0, address="addr-1", symbol="GOOD", age=20,
+              x_trend_detected=False, x_entity=None, social_confidence=0.0):
     return {
         "score": score, "trend": trend, "price_usd": price_usd, "address": address,
         "symbol": symbol, "liquidity": 20000, "volume": 60000, "age": age, "buys": 100, "sells": 50,
+        "x_trend_detected": x_trend_detected, "x_entity": x_entity, "social_confidence": social_confidence,
     }
 
 
@@ -246,6 +248,56 @@ class TestFullBuyThenSellCycle(unittest.TestCase):
         # re-evaluated fresh immediately, exactly like before this
         # feature existed.
         self.assertEqual(decisions[-1]["action"], "BUY")
+
+    def test_buy_on_an_x_correlated_pair_tags_the_position_with_the_entity(self):
+        pair = make_pair(price_usd=1.00, x_trend_detected=True, x_entity="PEPITO", social_confidence=0.8)
+        decisions = paper_trader.run_paper_cycle([pair])
+
+        self.assertEqual(decisions[-1]["action"], "BUY")
+        self.assertIn("X signal: PEPITO", decisions[-1]["reason"])
+        position = paper_portfolio.load_state()["open_positions"][0]
+        self.assertEqual(position["x_entity"], "PEPITO")
+
+    def test_buy_without_an_x_signal_leaves_x_entity_none(self):
+        paper_trader.run_paper_cycle([make_pair(price_usd=1.00)])
+        position = paper_portfolio.load_state()["open_positions"][0]
+        self.assertIsNone(position["x_entity"])
+
+    def test_closing_an_x_correlated_position_feeds_the_learning_loop(self):
+        pair = make_pair(price_usd=1.00, x_trend_detected=True, x_entity="PEPITO", social_confidence=0.8)
+        paper_trader.run_paper_cycle([pair])  # cycle 1: buy, tagged with PEPITO
+
+        risen_pair = make_pair(price_usd=1.60, trend="NEUTRAL")  # cycle 2: take-profit sells it
+        with mock.patch.object(paper_trader.x_intelligence, "record_trade_outcome_for_entity") as mock_record:
+            paper_trader.run_paper_cycle([risen_pair])
+
+        mock_record.assert_called_once()
+        args, kwargs = mock_record.call_args
+        self.assertEqual(args[0], "PEPITO")
+        self.assertTrue(kwargs["was_useful"])  # take-profit -> a real win
+
+    def test_closing_a_position_with_no_x_entity_never_calls_the_learning_loop(self):
+        paper_trader.run_paper_cycle([make_pair(price_usd=1.00)])  # no X signal
+
+        risen_pair = make_pair(price_usd=1.60, trend="NEUTRAL")
+        with mock.patch.object(paper_trader.x_intelligence, "record_trade_outcome_for_entity") as mock_record:
+            paper_trader.run_paper_cycle([risen_pair])
+
+        mock_record.assert_not_called()
+
+    def test_learning_loop_failure_never_breaks_the_close(self):
+        pair = make_pair(price_usd=1.00, x_trend_detected=True, x_entity="PEPITO", social_confidence=0.8)
+        paper_trader.run_paper_cycle([pair])
+
+        risen_pair = make_pair(price_usd=1.60, trend="NEUTRAL")
+        with mock.patch.object(paper_trader.x_intelligence, "record_trade_outcome_for_entity", side_effect=RuntimeError("boom")):
+            decisions = paper_trader.run_paper_cycle([risen_pair])
+
+        sell_decisions = [d for d in decisions if d["action"] == "SELL"]
+        self.assertEqual(len(sell_decisions), 1)
+        state = paper_portfolio.load_state()
+        self.assertEqual(state["open_positions"], [])
+        self.assertEqual(len(state["closed_trades"]), 1)
 
 
 if __name__ == "__main__":

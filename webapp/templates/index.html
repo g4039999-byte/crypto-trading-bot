@@ -368,6 +368,7 @@ function renderStatus(s) {
     <div>
       <div class="item-main">${o.symbol} <span class="pill">${o.status}</span></div>
       <div class="item-sub">${o.trend} ${o.news_count > 0 ? "· 📰 " + o.news_count + " خبر" : ""}</div>
+      ${o.x_entity ? `<div class="item-sub">𝕏 ${o.x_entity} · ثقة ${(o.x_confidence ?? 0).toFixed(2)} · ${o.x_mentions ?? 0} مصدر مستقل${o.x_possible_clone ? " · ⚠️ شبيه بعملة أخرى" : ""}</div>` : ""}
     </div>
     <div class="pill">النقاط: ${o.score ?? "—"}</div>
   `);
