@@ -287,12 +287,12 @@ CURRENT = Strategy(
 )
 
 CANDIDATE = Strategy(
-    name="CANDIDATE (older min age, tighter take-profit, liquidity-drawdown guard, stop-loss cooldown)",
-    min_score=45, entry_trends=("STRONG", "RISING", "NEUTRAL"),
+    name="CANDIDATE (deployed, matches src/config.py's PAPER_* defaults)",
+    min_score=40, entry_trends=("STRONG", "RISING", "NEUTRAL"),
     min_liquidity_usd=5000, min_volume_24h_usd=25000,
     min_age_minutes=15, max_age_minutes=180,
     stop_loss_pct=25, take_profit_pct=25, max_holding_minutes=240,
-    max_liq_drawdown_pct=25, stop_loss_cooldown_minutes=60,
+    max_liq_drawdown_pct=40, stop_loss_cooldown_minutes=60,
 )
 
 

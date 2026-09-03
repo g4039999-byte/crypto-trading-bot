@@ -204,7 +204,7 @@ MAX_ROUND_TRIP_LOSS_PCT = _get_float("MAX_ROUND_TRIP_LOSS_PCT", 20.0)
 #     sellability check) still applies in full -- see src/paper_trader.py
 #     and src/risk.py. None of this touches MIN_LIVE_* or live_trader.py:
 #     live trading is unaffected and stays fully gated by LIVE_TRADING.
-PAPER_MIN_SCORE = _get_int("PAPER_MIN_SCORE", 45)
+PAPER_MIN_SCORE = _get_int("PAPER_MIN_SCORE", 40)
 PAPER_ENTRY_TRENDS = tuple(
     t.strip() for t in os.getenv("PAPER_ENTRY_TRENDS", "STRONG,RISING,NEUTRAL").split(",") if t.strip()
 )
@@ -257,7 +257,14 @@ PAPER_TAKE_PROFIT_PCT = _get_float("PAPER_TAKE_PROFIT_PCT", 25.0)
 # USD -- a level "still above the floor" can hide a pool actively being
 # drained. Both real closing losses on 2026-09-03 (NEVER, Magachud) had
 # already lost >50% of peak liquidity by the time they were bought.
-PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT = _get_float("PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT", 25.0)
+# 40 (was 25): re-swept after adding the 15m age floor above -- at 25%
+# this guard was also rejecting a lot of ordinary volatility that had
+# nothing to do with draining, for no extra protection (both real
+# incidents it targets are >50% drawdowns, comfortably still caught at
+# 40%). Backtest on the same 173-token dataset: 25% -> 10 trades/60%
+# win/+$3.73; 40% -> 12 trades/58.3% win/+$5.97 -- more trades, better
+# total PnL, essentially the same win rate.
+PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT = _get_float("PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT", 40.0)
 
 # Do not re-buy a token for this long after a stop-loss on it -- observed
 # live on 2026-09-03: Magachud was stop-lossed, then bought again 5

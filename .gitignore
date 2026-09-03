@@ -25,3 +25,9 @@ data/opportunity_watchlist.json
 # control panel is currently managing. Local-machine-only, regenerated
 # every Start/Stop, never contains secrets.
 data/webapp_radar.pid
+
+# scripts/strategy_registry.py's recorded backtest history -- derived
+# from this machine's own data/snapshots.json, so it's local analysis
+# output (like the runtime state above), not source. Regenerate with
+# `python -m scripts.strategy_registry record <preset>`.
+data/strategy_versions.json

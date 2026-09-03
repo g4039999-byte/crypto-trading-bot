@@ -226,6 +226,37 @@ def evaluate_exit(position, current_price_usd):
     return {"action": action, "reason": reason}
 
 
+def _skip_reason_bucket(reason):
+    """Collapse a SKIP decision's free-text reason into a small, stable
+    set of buckets for the per-cycle funnel summary below -- individual
+    reasons (e.g. exact scores) still go to data/paper_trade_log.jsonl
+    in full; this is just the aggregate view.
+    """
+    if "already holding" in reason:
+        return "already_held"
+    if "cooldown" in reason:
+        return "stop_loss_cooldown"
+    if "already at the max" in reason:
+        return "max_open_positions"
+    if "daily (paper) loss cap" in reason:
+        return "daily_loss_cap"
+    if "no usable price" in reason:
+        return "no_price"
+    if "below paper minimum" in reason:
+        return "score_too_low"
+    if reason.startswith("trend "):
+        return "trend_not_acceptable"
+    if "drained" in reason:
+        return "liquidity_draining"
+    if "capital room" in reason:
+        return "capital_deployment_cap"
+    if "liquidity" in reason or "24h volume" in reason or "rug-risk window" in reason or "window" in reason or "no recorded trades" in reason:
+        return "risk_screen"
+    if "sellability" in reason or "honeypot" in reason:
+        return "sellability_honeypot"
+    return "other"
+
+
 def run_paper_cycle(evaluated_pairs):
     """One pass over the radar's results: check every open paper position
     for an exit (using each pair's current price_usd when available),
@@ -275,5 +306,19 @@ def run_paper_cycle(evaluated_pairs):
                 entry_age_minutes=entry_decision.get("entry_age_minutes"),
                 discovery_to_entry_seconds=entry_decision.get("discovery_to_entry_seconds"),
             )
+
+    buys = sum(1 for d in decisions if d["action"] == "BUY")
+    sells = sum(1 for d in decisions if d["action"] == "SELL")
+    skip_buckets = {}
+    for d in decisions:
+        if d["action"] != "SKIP":
+            continue
+        bucket = _skip_reason_bucket(d["reason"])
+        skip_buckets[bucket] = skip_buckets.get(bucket, 0) + 1
+    logger.info(
+        "Paper cycle funnel: %s candidate(s) evaluated -> %s BUY, %s SELL, skip reasons: %s",
+        len(evaluated_pairs), buys, sells,
+        dict(sorted(skip_buckets.items(), key=lambda kv: -kv[1])) or "none",
+    )
 
     return decisions
