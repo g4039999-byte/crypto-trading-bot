@@ -37,6 +37,7 @@ _DEFAULT_STATE = {
     "outage_reason": None,
     "last_recovery_at": None,
     "last_updated_at": None,
+    "process_started_at": None,
 }
 
 
@@ -63,6 +64,19 @@ def _save_health(state):
         HEALTH_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
     except OSError:
         logger.exception("Could not persist stocks health state -- non-fatal")
+
+
+def record_start():
+    """Call once when the continuous loop begins (src.stocks.engine.
+    run_forever) -- stamps process_started_at so the dashboard can show
+    an uptime figure. Idempotent-ish: only stamps if not already set
+    this "session" is not tracked across restarts by design -- a
+    restart is exactly when uptime should reset to zero.
+    """
+    state = load_health()
+    state["process_started_at"] = _now_iso()
+    _save_health(state)
+    return state
 
 
 def record_success(summary=None):

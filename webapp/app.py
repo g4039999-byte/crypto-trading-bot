@@ -226,6 +226,7 @@ def emergency_stop():
 # ---------------------------------------------------------------------------
 
 STOCKS_PID_FILE = PROJECT_ROOT / "data" / "webapp_stocks.pid"
+STOCKS_LAST_CYCLE_FILE = PROJECT_ROOT / "data" / "stocks" / "last_cycle.json"
 
 _stocks_lock = threading.RLock()
 _managed_stocks_process = None
@@ -384,6 +385,24 @@ def _latest_history(entry):
     return history[-1] if history else {}
 
 
+def _read_last_cycle():
+    """The last cycle's summary (incl. the opportunities snapshot),
+    written by src.stocks.engine every cycle -- or None if no cycle has
+    ever run yet, or the file is missing/corrupt. Reads STOCKS_LAST_
+    CYCLE_FILE as a module-level constant specifically so tests can
+    redirect it -- an inline path here once meant a test's synthetic
+    run_cycle() call silently overwrote the real, live production file
+    (see tests/stocks/test_engine.py's _EngineTestIsolation docstring
+    for the incident this fixes).
+    """
+    if not STOCKS_LAST_CYCLE_FILE.exists():
+        return None
+    try:
+        return json.loads(STOCKS_LAST_CYCLE_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def build_stocks_status():
     """Everything the US-stocks dashboard section needs. Never raises,
     never makes a live network/data-provider call itself -- reads only
@@ -435,13 +454,7 @@ def build_stocks_status():
             "mae_pct": round(t["mae_pct"], 2) if t.get("mae_pct") is not None else None,
         } for t in recent_closed]
 
-        last_cycle_path = PROJECT_ROOT / "data" / "stocks" / "last_cycle.json"
-        last_cycle = None
-        if last_cycle_path.exists():
-            try:
-                last_cycle = json.loads(last_cycle_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                last_cycle = None
+        last_cycle = _read_last_cycle()
 
         versions = list_versions()
         last_adopted = versions[-1] if versions else None
@@ -499,6 +512,287 @@ def build_stocks_status():
             "learning": {"last_run_at": None, "last_action": None, "last_action_reason": None, "recent_history": []},
             "server_time": datetime.now(timezone.utc).isoformat(),
         }
+
+
+_STOCKS_EMPTY_DASHBOARD = {
+    "process_running": False, "live_trading": False, "market_status": "CLOSED",
+    "overview": {
+        "system_state": "STOPPED", "equity_usd": 0, "available_cash_usd": 0, "deployed_usd": 0,
+        "unrealized_pnl_usd": 0, "realized_pnl_usd": 0, "daily_pnl_usd": 0, "total_pnl_usd": 0,
+        "starting_capital_usd": 0, "drawdown_pct": 0, "win_rate_pct": None, "profit_factor": None,
+        "expectancy_pct": None, "closed_trade_count": 0, "open_position_count": 0, "opportunity_count": 0,
+        "active_strategy": None, "learning_status": None, "has_problem": False,
+    },
+    "opportunities": [], "positions": [], "trades": [],
+    "performance": {"equity_curve": [], "daily_pnl": [], "cumulative_pnl": [], "drawdown_curve": [],
+                     "win_loss_distribution": [], "by_strategy": {}, "by_regime": {}, "by_ticker": {}, "avg_win_vs_avg_loss": {}},
+    "strategy_lab": {"active_strategy": None, "versions": [], "daily_strategies": []},
+    "learning": {"last_run_at": None, "last_action": None, "last_action_reason": None, "recent_history": []},
+    "market_intelligence": {"regime": None, "x_status": {"configured": False, "enabled": False}, "data_source_health": {}},
+    "system_health": {"status": "UNKNOWN", "last_success_at": None, "consecutive_failures": None,
+                       "recovery_attempts_total": None, "outage_started_at": None, "outage_reason": None,
+                       "last_recovery_at": None, "process_started_at": None, "uptime_seconds": None, "last_cycle": None},
+    "server_time": None,
+}
+
+
+def _uptime_seconds(process_started_at):
+    if not process_started_at:
+        return None
+    try:
+        started = datetime.fromisoformat(process_started_at)
+        return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+    except (ValueError, TypeError):
+        return None
+
+
+def _pnl_class(value):
+    if value is None:
+        return "flat"
+    return "pos" if value > 0 else ("neg" if value < 0 else "flat")
+
+
+def build_stocks_dashboard():
+    """The full aggregate payload for the new /stocks dashboard page --
+    strictly additive to build_stocks_status() above (that endpoint is
+    untouched, still used by the compact section on the original
+    dashboard). Same non-negotiable rule: reads only local state files
+    (paper_positions.json, last_cycle.json, strategy_versions.json,
+    learning_state.json, health_status.json) plus in-memory config
+    (X configured/enabled) -- NEVER a live data-provider/broker/X call,
+    so polling this endpoint can never itself trigger network traffic,
+    burn rate-limit budget, or block on a slow upstream. Never raises:
+    any failure degrades to _STOCKS_EMPTY_DASHBOARD, a safe, fully-shaped
+    empty payload the frontend can always render without special-casing.
+    """
+    try:
+        from src.stocks import health as stocks_health
+        from src.stocks import learning_engine as stocks_learning
+        from src.stocks import market_hours as stocks_market_hours
+        from src.stocks.config import STOCKS_LIVE_TRADING, STOCKS_MAX_OPEN_POSITIONS, STOCKS_STARTING_CAPITAL_USD
+        from src.stocks.paper_broker import load_state as load_stocks_state
+        from src.stocks.performance import compute_metrics
+        from src.stocks.strategy_registry import DAILY_STRATEGIES, get_active_strategy, list_versions
+        from src.x_client import is_configured as x_is_configured
+
+        process_running = is_stocks_running()
+        market_status = stocks_market_hours.market_status()
+        state = load_stocks_state()
+        open_positions = state.get("open_positions", [])
+        closed_trades = state.get("closed_trades", [])
+
+        realized_pnl = sum((t.get("pnl_usd") or 0) for t in closed_trades)
+        unrealized_pnl = sum(
+            ((p.get("last_price") - p["entry_price"]) * p["shares"])
+            for p in open_positions if p.get("last_price") is not None and p.get("entry_price") and p.get("shares")
+        )
+        deployed = sum((p.get("size_usd") or 0) for p in open_positions)
+        equity = STOCKS_STARTING_CAPITAL_USD + realized_pnl + unrealized_pnl
+        available_cash = STOCKS_STARTING_CAPITAL_USD + realized_pnl - deployed
+        daily_pnl = state.get("daily_pnl_usd", {}).get(_today_key(), 0.0)
+
+        peak_equity = state.get("peak_equity_usd", STOCKS_STARTING_CAPITAL_USD)
+        realized_balance = STOCKS_STARTING_CAPITAL_USD + realized_pnl
+        drawdown_pct = round(max(0.0, (peak_equity - realized_balance) / peak_equity * 100), 2) if peak_equity else 0.0
+
+        closed_pnl_pcts = [t["pnl_pct"] for t in closed_trades if t.get("pnl_pct") is not None]
+        overall_metrics = compute_metrics(closed_pnl_pcts)
+
+        last_cycle = _read_last_cycle()
+
+        health_state = stocks_health.load_health()
+        learning_state = stocks_learning.get_learning_state()
+        versions = list_versions()
+        active_strategy = get_active_strategy()
+
+        opportunities = (last_cycle or {}).get("opportunities") or []
+        opportunities_view = [{
+            "symbol": o.get("symbol"), "price": o.get("price"), "pct_change_1d": o.get("pct_change_1d"),
+            "volume": o.get("volume"), "relative_volume": o.get("relative_volume"), "atr_pct": o.get("atr_pct"),
+            "score": o.get("score"), "strategy": o.get("strategy"), "action": o.get("action"), "reason": o.get("reason"),
+            "entry_zone": o.get("entry_zone"), "stop_loss": o.get("stop_loss"), "take_profit": o.get("take_profit"),
+            "risk_reward": o.get("risk_reward"),
+        } for o in opportunities]
+
+        positions_view = []
+        for p in open_positions:
+            entry_price, last_price, shares = p.get("entry_price"), p.get("last_price"), p.get("shares")
+            unrealized_usd = (last_price - entry_price) * shares if last_price is not None and entry_price and shares else None
+            unrealized_pct = (last_price - entry_price) / entry_price * 100 if last_price is not None and entry_price else None
+            held_seconds = None
+            try:
+                held_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(p["opened_at"])).total_seconds()
+            except (KeyError, ValueError, TypeError):
+                pass
+            positions_view.append({
+                "symbol": p.get("symbol"), "entry_price": entry_price, "current_price": last_price,
+                "size_usd": _fmt_money(p.get("size_usd")), "unrealized_pnl_usd": _fmt_money(unrealized_usd) if unrealized_usd is not None else None,
+                "unrealized_pnl_pct": round(unrealized_pct, 2) if unrealized_pct is not None else None,
+                "stop_loss_price": p.get("stop_loss_price"), "take_profit_price": p.get("take_profit_price"),
+                "trailing_stop_price": p.get("trailing_stop_price"), "held_hours": round(held_seconds / 3600, 1) if held_seconds is not None else None,
+                "opened_at": p.get("opened_at"), "strategy": p.get("strategy"), "entry_score": p.get("entry_score"),
+                "entry_reason": p.get("entry_reason"), "last_price_at": p.get("last_price_at"),
+            })
+
+        trades_view = []
+        for t in sorted(closed_trades, key=lambda t: t.get("closed_at") or "", reverse=True)[:200]:
+            held_hours = None
+            try:
+                held_hours = round((datetime.fromisoformat(t["closed_at"]) - datetime.fromisoformat(t["opened_at"])).total_seconds() / 3600, 1)
+            except (KeyError, ValueError, TypeError):
+                pass
+            trades_view.append({
+                "symbol": t.get("symbol"), "entry_price": t.get("entry_price"), "exit_price": t.get("exit_price"),
+                "size_usd": _fmt_money(t.get("size_usd")), "pnl_usd": _fmt_money(t.get("pnl_usd")),
+                "pnl_pct": round(t["pnl_pct"], 2) if t.get("pnl_pct") is not None else None,
+                "is_win": (t.get("pnl_usd") or 0) > 0, "held_hours": held_hours, "strategy": t.get("strategy"),
+                "entry_score": t.get("entry_score"), "entry_reason": t.get("entry_reason"), "reason": t.get("reason"),
+                "opened_at": t.get("opened_at"), "closed_at": t.get("closed_at"),
+                "mfe_pct": round(t["mfe_pct"], 2) if t.get("mfe_pct") is not None else None,
+                "mae_pct": round(t["mae_pct"], 2) if t.get("mae_pct") is not None else None,
+                "was_correct": t.get("was_correct"),
+            })
+
+        performance = _build_stocks_performance(closed_trades, STOCKS_STARTING_CAPITAL_USD)
+
+        strategy_lab = {
+            "active_strategy": active_strategy,
+            "daily_strategies": list(DAILY_STRATEGIES),
+            "versions": versions[-10:],  # most recent first for display
+        }
+
+        regime = (last_cycle or {}).get("regime")
+        market_intel = {
+            "regime": regime,
+            "x_status": {"configured": x_is_configured(), "enabled": x_is_configured()},
+            "data_source_health": {
+                "scanner": health_state.get("status"),
+                "last_cycle_scanned": (last_cycle or {}).get("scanned"),
+                "last_cycle_candidates": (last_cycle or {}).get("candidates"),
+            },
+        }
+
+        has_problem = health_state.get("status") in ("DEGRADED", "RECOVERING") or not process_running
+
+        return {
+            "process_running": process_running,
+            "live_trading": STOCKS_LIVE_TRADING,
+            "market_status": market_status,
+            "overview": {
+                "system_state": "RUNNING" if process_running else "STOPPED",
+                "equity_usd": _fmt_money(equity),
+                "available_cash_usd": _fmt_money(available_cash),
+                "deployed_usd": _fmt_money(deployed),
+                "unrealized_pnl_usd": _fmt_money(unrealized_pnl),
+                "realized_pnl_usd": _fmt_money(realized_pnl),
+                "daily_pnl_usd": _fmt_money(daily_pnl),
+                "total_pnl_usd": _fmt_money(realized_pnl + unrealized_pnl),
+                "starting_capital_usd": _fmt_money(STOCKS_STARTING_CAPITAL_USD),
+                "drawdown_pct": drawdown_pct,
+                "win_rate_pct": overall_metrics.get("win_rate_pct"),
+                "profit_factor": overall_metrics.get("profit_factor"),
+                "expectancy_pct": overall_metrics.get("expectancy_pct"),
+                "closed_trade_count": len(closed_trades),
+                "open_position_count": len(open_positions),
+                "opportunity_count": len(opportunities_view),
+                "max_open_positions": STOCKS_MAX_OPEN_POSITIONS,
+                "active_strategy": active_strategy,
+                "learning_status": learning_state.get("last_action"),
+                "has_problem": has_problem,
+            },
+            "opportunities": opportunities_view,
+            "positions": positions_view,
+            "trades": trades_view,
+            "performance": performance,
+            "strategy_lab": strategy_lab,
+            "learning": {
+                "last_run_at": learning_state.get("last_run_at"),
+                "last_action": learning_state.get("last_action"),
+                "last_action_reason": learning_state.get("last_action_reason"),
+                "recent_history": (learning_state.get("history") or [])[-10:],
+            },
+            "market_intelligence": market_intel,
+            "system_health": {
+                "status": health_state.get("status"),
+                "last_success_at": health_state.get("last_success_at"),
+                "consecutive_failures": health_state.get("consecutive_failures"),
+                "recovery_attempts_total": health_state.get("recovery_attempts_total"),
+                "outage_started_at": health_state.get("outage_started_at"),
+                "outage_reason": health_state.get("outage_reason"),
+                "last_recovery_at": health_state.get("last_recovery_at"),
+                "process_started_at": health_state.get("process_started_at"),
+                "uptime_seconds": _uptime_seconds(health_state.get("process_started_at")),
+                "last_cycle": last_cycle,
+            },
+            "server_time": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception:
+        logger.exception("Failed to build stocks dashboard -- returning a safe empty payload")
+        return {**_STOCKS_EMPTY_DASHBOARD, "server_time": datetime.now(timezone.utc).isoformat()}
+
+
+def _build_stocks_performance(closed_trades, starting_capital):
+    """Chart-ready series computed from closed_trades, sorted oldest-
+    first by close time -- equity curve, daily P/L, cumulative P/L,
+    drawdown curve (all on this project's summed-return dollar
+    convention, consistent with src.stocks.performance's documented
+    choice not to compound), win/loss distribution buckets, and
+    breakdowns by strategy/regime/ticker. Pure computation, no I/O.
+    """
+    ordered = sorted((t for t in closed_trades if t.get("closed_at")), key=lambda t: t["closed_at"])
+
+    equity_curve, cumulative_pnl, drawdown_curve = [], [], []
+    running_total, peak = 0.0, 0.0
+    for t in ordered:
+        running_total += t.get("pnl_usd") or 0
+        peak = max(peak, running_total)
+        equity_curve.append({"t": t["closed_at"], "v": round(starting_capital + running_total, 2)})
+        cumulative_pnl.append({"t": t["closed_at"], "v": round(running_total, 2)})
+        drawdown_curve.append({"t": t["closed_at"], "v": round(running_total - peak, 2)})
+
+    daily = {}
+    for t in ordered:
+        day = t["closed_at"][:10]
+        daily[day] = daily.get(day, 0.0) + (t.get("pnl_usd") or 0)
+    daily_pnl = [{"t": day, "v": round(v, 2)} for day, v in sorted(daily.items())]
+
+    wins = [t["pnl_pct"] for t in ordered if (t.get("pnl_usd") or 0) > 0 and t.get("pnl_pct") is not None]
+    losses = [t["pnl_pct"] for t in ordered if (t.get("pnl_usd") or 0) <= 0 and t.get("pnl_pct") is not None]
+    buckets = [(-100, -10), (-10, -5), (-5, -2), (-2, 0), (0, 2), (2, 5), (5, 10), (10, 100)]
+    win_loss_distribution = []
+    all_pcts = [t["pnl_pct"] for t in ordered if t.get("pnl_pct") is not None]
+    for lo, hi in buckets:
+        count = sum(1 for p in all_pcts if lo <= p < hi)
+        win_loss_distribution.append({"range": f"{lo}% إلى {hi}%", "count": count})
+
+    def _group_metrics(key_fn):
+        from src.stocks.performance import compute_metrics
+        groups = {}
+        for t in ordered:
+            key = key_fn(t)
+            if key is None:
+                continue
+            groups.setdefault(key, []).append(t.get("pnl_pct"))
+        return {k: compute_metrics([p for p in v if p is not None]) for k, v in groups.items()}
+
+    by_strategy = _group_metrics(lambda t: t.get("strategy"))
+    by_regime = _group_metrics(lambda t: (t.get("regime_snapshot") or {}).get("trend"))
+    by_ticker = _group_metrics(lambda t: t.get("symbol"))
+
+    return {
+        "equity_curve": equity_curve,
+        "daily_pnl": daily_pnl,
+        "cumulative_pnl": cumulative_pnl,
+        "drawdown_curve": drawdown_curve,
+        "win_loss_distribution": win_loss_distribution,
+        "by_strategy": by_strategy,
+        "by_regime": by_regime,
+        "by_ticker": by_ticker,
+        "avg_win_vs_avg_loss": {
+            "avg_win_pct": round(sum(wins) / len(wins), 2) if wins else None,
+            "avg_loss_pct": round(sum(losses) / len(losses), 2) if losses else None,
+        },
+    }
 
 
 def build_status():
@@ -668,6 +962,27 @@ def api_stocks_start():
 def api_stocks_stop():
     ok, message = stop_stocks()
     return jsonify({"ok": ok, "message": message, "status": build_stocks_status()})
+
+
+@app.route("/stocks")
+def stocks_dashboard_page():
+    return render_template("stocks_dashboard.html")
+
+
+@app.route("/api/stocks/dashboard")
+def api_stocks_dashboard():
+    return jsonify(build_stocks_dashboard())
+
+
+@app.route("/api/stocks/restart", methods=["POST"])
+def api_stocks_restart():
+    """Stop then start the stocks loop in one server-side action -- the
+    dashboard's "Restart Scanner" button. Still paper-only: calls the
+    exact same start_stocks()/stop_stocks() every other control uses.
+    """
+    stop_stocks()
+    ok, message = start_stocks()
+    return jsonify({"ok": ok, "message": message, "status": build_stocks_dashboard()})
 
 
 def _port_is_free(host, port):

@@ -58,17 +58,19 @@ class TestPaperBroker(unittest.TestCase):
         self.assertIsNone(pb.close_position("NOPE", 100.0, "stop_loss"))
 
     def test_evaluate_exit_closes_triggered_positions_and_updates_mfe_for_others(self):
-        pb.open_position("AAPL", 100.0, 500.0, atr_at_entry=2.0)  # stop ~97, take ~106
-        pb.open_position("MSFT", 200.0, 500.0, atr_at_entry=4.0)  # stop ~194, take ~212
+        aapl = pb.open_position("AAPL", 100.0, 500.0, atr_at_entry=2.0)
+        pb.open_position("MSFT", 200.0, 500.0, atr_at_entry=4.0)
+        aapl_take_profit = aapl["take_profit_price"]  # actual level, not a hardcoded guess -- see the config change this replaces
+        msft_price_well_below_its_own_levels = 205.0  # inside MSFT's own stop/take-profit band regardless of the ATR multipliers configured
 
-        results = pb.evaluate_exit_for_open_positions({"AAPL": 107.0, "MSFT": 205.0})
+        results = pb.evaluate_exit_for_open_positions({"AAPL": aapl_take_profit, "MSFT": msft_price_well_below_its_own_levels})
 
         self.assertEqual(len(results), 1)  # only AAPL's take-profit triggers
         state = pb.load_state()
         remaining_symbols = {p["symbol"] for p in state["open_positions"]}
         self.assertEqual(remaining_symbols, {"MSFT"})
         msft = next(p for p in state["open_positions"] if p["symbol"] == "MSFT")
-        self.assertEqual(msft["mfe_price"], 205.0)
+        self.assertEqual(msft["mfe_price"], msft_price_well_below_its_own_levels)
 
     def test_evaluate_exit_skips_symbols_with_no_price_this_cycle(self):
         pb.open_position("AAPL", 100.0, 500.0, atr_at_entry=2.0)

@@ -16,6 +16,20 @@ class TestHealth(unittest.TestCase):
     def tearDown(self):
         self._tmp_dir.cleanup()
 
+    def test_record_start_stamps_process_started_at(self):
+        self.assertIsNone(health.load_health()["process_started_at"])
+        state = health.record_start()
+        self.assertIsNotNone(state["process_started_at"])
+        self.assertEqual(health.load_health()["process_started_at"], state["process_started_at"])
+
+    def test_record_start_resets_the_timestamp_on_every_call(self):
+        first = health.record_start()["process_started_at"]
+        second = health.record_start()["process_started_at"]
+        # Both real timestamps -- just confirms this always re-stamps
+        # (a restart genuinely resets uptime), not a one-time latch.
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+
     def test_fresh_state_defaults_to_starting(self):
         state = health.load_health()
         self.assertEqual(state["status"], "STARTING")

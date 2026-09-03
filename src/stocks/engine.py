@@ -15,8 +15,11 @@ the crypto side's convention. See tests/stocks/test_engine.py's
 resilience tests.
 """
 
+import json
 import logging
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 from src.stocks import health
 from src.stocks.config import STOCKS_LOOP_INTERVAL_SECONDS, STOCKS_MARKET_CLOSED_POLL_SECONDS, STOCKS_MIN_SCORE, STOCKS_RESPECT_MARKET_HOURS
@@ -26,10 +29,12 @@ from src.stocks.market_hours import is_market_open, seconds_until_next_open
 from src.stocks.paper_broker import evaluate_exit_for_open_positions, load_state, open_position
 from src.stocks.paper_logger import log_decision
 from src.stocks.regime import current_regime, risk_multiplier
-from src.stocks.risk_engine import can_open_new_position, compute_position_size_usd
+from src.stocks.risk_engine import can_open_new_position, compute_position_size_usd, stop_loss_price, take_profit_price
 from src.stocks.scoring import calculate_score
 
 logger = logging.getLogger(__name__)
+
+LAST_CYCLE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "stocks" / "last_cycle.json"
 
 
 def _x_social_signal(symbol, features):
@@ -118,6 +123,48 @@ def evaluate_entry(symbol, candidate, regime, state):
     }
 
 
+def _opportunity_snapshot(symbol, candidate, decision):
+    """A read-only, display-only summary of one scanned candidate for
+    the dashboard's Opportunity Scanner -- built entirely from
+    `candidate`/`decision`, which evaluate_entry() has already computed
+    for the real trading decision; this adds NOTHING to that decision
+    and never influences it. stop_loss/take_profit here are the SAME
+    ATR-based math src.stocks.risk_engine uses for a real position,
+    computed against the candidate's current price purely for display
+    (an illustrative "if this were entered now" level, not a placed
+    order) whenever a usable ATR is available, whether or not this
+    candidate actually qualified to BUY this cycle.
+    """
+    features = candidate.get("features", {})
+    price = features.get("price")
+    atr = features.get("atr")
+
+    stop, take, risk_reward = None, None, None
+    if price and atr and atr > 0:
+        stop = stop_loss_price(price, atr)
+        take = take_profit_price(price, atr)
+        risk = price - stop
+        reward = take - price
+        risk_reward = round(reward / risk, 2) if risk > 0 else None
+
+    return {
+        "symbol": symbol,
+        "price": price,
+        "pct_change_1d": features.get("pct_change_1d"),
+        "volume": features.get("volume"),
+        "relative_volume": features.get("relative_volume"),
+        "atr_pct": features.get("atr_pct"),
+        "score": decision.get("score"),
+        "strategy": decision.get("strategy"),
+        "action": decision.get("action"),
+        "reason": decision.get("reason"),
+        "entry_zone": price,
+        "stop_loss": stop,
+        "take_profit": take,
+        "risk_reward": risk_reward,
+    }
+
+
 def run_cycle():
     """One full cycle. Returns a summary dict (counts, for the funnel
     log / dashboard) -- never raises: every stage is wrapped so a
@@ -160,9 +207,11 @@ def run_cycle():
 
     state = load_state()
     ranked = sorted(candidates.items(), key=lambda kv: kv[1]["features"].get("relative_volume") or 0, reverse=True)
+    opportunities = []
     for symbol, candidate in ranked:
         summary["scanned"] += 1
         decision = evaluate_entry(symbol, candidate, regime, state)
+        opportunities.append(_opportunity_snapshot(symbol, candidate, decision))
         if decision["action"] == "BUY":
             open_position(
                 symbol, candidate["features"]["price"], decision["size_usd"], decision["atr"],
@@ -175,6 +224,7 @@ def run_cycle():
             summary["skips"] += 1
 
     summary["regime"] = regime
+    summary["opportunities"] = sorted(opportunities, key=lambda o: o["score"] if o["score"] is not None else -1, reverse=True)[:25]
     logger.info(
         "Stocks cycle: %s candidate(s) passed filter -> %s BUY, %s SELL, %s SKIP (regime=%s/%s)",
         summary["candidates"], summary["buys"], summary["sells"], summary["skips"],
@@ -192,13 +242,8 @@ def _write_last_cycle_status(summary):
     the cycle that just ran.
     """
     try:
-        import json
-        from datetime import datetime, timezone
-        from pathlib import Path
-
-        path = Path(__file__).resolve().parent.parent.parent / "data" / "stocks" / "last_cycle.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({**summary, "completed_at": datetime.now(timezone.utc).isoformat()}, indent=2), encoding="utf-8")
+        LAST_CYCLE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LAST_CYCLE_FILE.write_text(json.dumps({**summary, "completed_at": datetime.now(timezone.utc).isoformat()}, indent=2), encoding="utf-8")
     except Exception:
         logger.exception("Could not persist last-cycle status -- non-fatal")
 
@@ -257,6 +302,7 @@ def run_forever(interval_seconds=None, max_iterations=None):
     """
     interval_seconds = STOCKS_LOOP_INTERVAL_SECONDS if interval_seconds is None else interval_seconds
     logger.info("Starting continuous stocks paper-trading loop (interval=%ss)", interval_seconds)
+    health.record_start()
 
     iteration = 0
     try:
@@ -268,7 +314,7 @@ def run_forever(interval_seconds=None, max_iterations=None):
             logger.info("--- Stocks cycle %s ---", iteration)
             try:
                 summary = run_cycle()
-                health.record_success(summary={k: v for k, v in summary.items() if k != "regime"})
+                health.record_success(summary={k: v for k, v in summary.items() if k not in ("regime", "opportunities")})
                 sleep_for = interval_seconds
             except Exception as exc:
                 logger.exception("Stocks cycle %s failed -- auto-recovering", iteration)

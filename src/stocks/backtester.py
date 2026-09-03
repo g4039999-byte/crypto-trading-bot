@@ -9,9 +9,16 @@ Look-ahead discipline: a signal on day i is computed from bars[:i+1]
 only (never a later bar), and if it fires, the fill price is day i+1's
 OPEN, not day i's close -- the earliest price actually achievable by a
 decision made after day i's bar closed. Exits are checked against each
-subsequent day's own high/low (stop before target if both would have
-triggered the same day -- the conservative assumption when daily bars
-can't say which came first intraday).
+subsequent day's own high/low, in the same PRECEDENCE order src.stocks.
+risk_engine.check_exit() uses live -- stop_loss, then trailing_stop,
+then take_profit, then max_holding_time -- the conservative assumption
+when daily bars can't say which actually came first intraday. The
+trailing stop itself is simulated with risk_engine.update_trailing_stop()
+(the exact function the live loop calls), updated off each day's HIGH
+before that day's exits are checked -- omitting this would silently
+backtest a DIFFERENT, simpler exit rule (fixed stop/target only) than
+what paper/live trading actually runs, which is not a minor detail: it
+changes the exit price on every trade that would have trailed.
 
 Realistic costs: every fill (entry and exit alike) is moved against the
 trader by STOCKS_SLIPPAGE_BPS and STOCKS_COMMISSION_PER_TRADE_USD is
@@ -79,7 +86,7 @@ from src.stocks.config import (
 )
 from src.stocks.data_provider import get_provider
 from src.stocks.features import compute_features_series, features_row_to_dict
-from src.stocks.risk_engine import stop_loss_price, take_profit_price
+from src.stocks.risk_engine import stop_loss_price, take_profit_price, update_trailing_stop
 from src.stocks.strategies import STRATEGIES
 
 logger = logging.getLogger(__name__)
@@ -147,9 +154,24 @@ def _backtest_one_symbol(strategy_name, symbol, df, split_index, fold_boundaries
         if position is not None:
             day = df.iloc[i]
             held_days = i - position["entry_index"]
+
+            # Trailing stop, simulated with the same src.stocks.risk_engine
+            # function the live loop actually calls -- a backtest that
+            # never modeled this would be testing a DIFFERENT exit rule
+            # than what paper (and any future live) trading uses, which
+            # is not a subtlety, it changes the exit price and therefore
+            # every pnl_pct in this backtest. Updated off the day's HIGH
+            # (the best price the position could have touched that day,
+            # which is what a trail tracked continuously would have
+            # ratcheted against) before checking whether it (or the hard
+            # stop/target) also got hit that same day.
+            position["trailing_stop_price"] = update_trailing_stop(position, float(day["high"]))
+
             exit_price, reason = None, None
             if day["low"] <= position["stop_loss_price"]:
                 exit_price, reason = position["stop_loss_price"], "stop_loss"
+            elif position["trailing_stop_price"] is not None and day["low"] <= position["trailing_stop_price"]:
+                exit_price, reason = position["trailing_stop_price"], "trailing_stop"
             elif day["high"] >= position["take_profit_price"]:
                 exit_price, reason = position["take_profit_price"], "take_profit"
             elif held_days >= STOCKS_MAX_HOLDING_DAYS:
@@ -198,9 +220,10 @@ def _backtest_one_symbol(strategy_name, symbol, df, split_index, fold_boundaries
 
         raw_entry_price = float(df["open"].iloc[i + 1])
         position = {
-            "entry_index": i + 1, "entry_price": raw_entry_price,
+            "entry_index": i + 1, "entry_price": raw_entry_price, "atr_at_entry": atr_value,
             "stop_loss_price": stop_loss_price(raw_entry_price, atr_value),
             "take_profit_price": take_profit_price(raw_entry_price, atr_value),
+            "trailing_stop_price": None,
             "confidence": signal["confidence"],
         }
 

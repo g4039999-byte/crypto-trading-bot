@@ -2,7 +2,16 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from src.stocks.market_hours import ET, is_market_open, seconds_until_next_open
+from src.stocks.market_hours import (
+    ET,
+    STATUS_AFTER_HOURS,
+    STATUS_CLOSED,
+    STATUS_OPEN,
+    STATUS_PRE_MARKET,
+    is_market_open,
+    market_status,
+    seconds_until_next_open,
+)
 
 
 def _et(y, m, d, h, mi):
@@ -66,6 +75,33 @@ class TestSecondsUntilNextOpen(unittest.TestCase):
         # Dec 25 2026 is a holiday (Friday) -> next open is Monday Dec 28.
         expected_open = _et(2026, 12, 28, 9, 30)
         self.assertAlmostEqual(seconds, (expected_open - _et(2026, 12, 24, 17, 0)).total_seconds(), delta=1)
+
+
+class TestMarketStatus(unittest.TestCase):
+    def test_open_during_regular_session(self):
+        self.assertEqual(market_status(_et(2026, 9, 2, 10, 0)), STATUS_OPEN)
+
+    def test_pre_market_window(self):
+        self.assertEqual(market_status(_et(2026, 9, 2, 7, 0)), STATUS_PRE_MARKET)
+
+    def test_after_hours_window(self):
+        self.assertEqual(market_status(_et(2026, 9, 2, 18, 0)), STATUS_AFTER_HOURS)
+
+    def test_closed_overnight(self):
+        self.assertEqual(market_status(_et(2026, 9, 2, 2, 0)), STATUS_CLOSED)
+        self.assertEqual(market_status(_et(2026, 9, 2, 21, 0)), STATUS_CLOSED)
+
+    def test_closed_on_weekend_even_during_what_would_be_regular_hours(self):
+        self.assertEqual(market_status(_et(2026, 9, 5, 10, 0)), STATUS_CLOSED)  # Saturday
+
+    def test_closed_on_a_holiday_even_during_what_would_be_regular_hours(self):
+        self.assertEqual(market_status(_et(2026, 12, 25, 10, 0)), STATUS_CLOSED)
+
+    def test_boundaries_are_exact(self):
+        self.assertEqual(market_status(_et(2026, 9, 2, 4, 0)), STATUS_PRE_MARKET)   # pre-market starts
+        self.assertEqual(market_status(_et(2026, 9, 2, 9, 30)), STATUS_OPEN)         # regular starts
+        self.assertEqual(market_status(_et(2026, 9, 2, 16, 0)), STATUS_AFTER_HOURS)  # after-hours starts
+        self.assertEqual(market_status(_et(2026, 9, 2, 20, 0)), STATUS_CLOSED)       # after-hours ends
 
 
 if __name__ == "__main__":

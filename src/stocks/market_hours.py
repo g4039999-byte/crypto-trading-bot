@@ -22,6 +22,13 @@ ET = ZoneInfo("America/New_York")
 
 _REGULAR_OPEN = time(9, 30)
 _REGULAR_CLOSE = time(16, 0)
+_PRE_MARKET_OPEN = time(4, 0)
+_AFTER_HOURS_CLOSE = time(20, 0)
+
+STATUS_OPEN = "OPEN"
+STATUS_PRE_MARKET = "PRE_MARKET"
+STATUS_AFTER_HOURS = "AFTER_HOURS"
+STATUS_CLOSED = "CLOSED"
 
 # Full-day NYSE holidays -- New Year's Day, MLK Day, Presidents' Day,
 # Good Friday, Memorial Day, Juneteenth, Independence Day, Labor Day,
@@ -52,6 +59,30 @@ def is_market_open(now=None):
     if now.date() in _HOLIDAYS:
         return False
     return _REGULAR_OPEN <= now.time() < _REGULAR_CLOSE
+
+
+def market_status(now=None):
+    """A dashboard-friendly label -- OPEN / PRE_MARKET / AFTER_HOURS /
+    CLOSED -- unlike is_market_open() (used to gate real trading
+    cycles, regular session only), this also distinguishes the
+    surrounding extended-hours windows purely for display: this
+    project's own strategies only ever act during the regular session
+    (is_market_open() is what engine.py actually gates on), so
+    PRE_MARKET/AFTER_HOURS here means "the market isn't closed for the
+    day, but the bot isn't scanning yet/anymore" -- not that a trade
+    could happen in that window.
+    """
+    now = now.astimezone(ET) if now is not None else datetime.now(ET)
+    if now.weekday() >= 5 or now.date() in _HOLIDAYS:
+        return STATUS_CLOSED
+    t = now.time()
+    if _REGULAR_OPEN <= t < _REGULAR_CLOSE:
+        return STATUS_OPEN
+    if _PRE_MARKET_OPEN <= t < _REGULAR_OPEN:
+        return STATUS_PRE_MARKET
+    if _REGULAR_CLOSE <= t < _AFTER_HOURS_CLOSE:
+        return STATUS_AFTER_HOURS
+    return STATUS_CLOSED
 
 
 def seconds_until_next_open(now=None):

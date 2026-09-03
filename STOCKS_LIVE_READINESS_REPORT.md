@@ -1,6 +1,6 @@
 # US Stocks Strategy -- Live Readiness Report
 
-Generated: 2026-09-03T20:45:00.077783+00:00
+Generated: 2026-09-03T21:37:48.096549+00:00
 
 **PAPER TRADING ONLY. `STOCKS_LIVE_TRADING` is hard-set `False` in `src/stocks/config.py` and nothing in this project can change that programmatically. Reaching a `LIVE_CANDIDATE` verdict below is a statement about historical backtest quality -- it is NOT a decision to trade real money, and never triggers one. A human must explicitly review this report and separately decide whether, when, and how to ever enable live trading -- no code in this repository can do that on its own.**
 
@@ -9,8 +9,9 @@ Generated: 2026-09-03T20:45:00.077783+00:00
 - Universe: 47 symbols
 - Lookback: 3650 days (~10.0 years)
 - Walk-forward folds: 5
-- Total resolved historical trades (all strategies combined): **11073**
+- Total resolved historical trades (all strategies combined): **10896**
 - Costs modeled: 5.0 bps slippage, $0.0 commission/trade (round-trip)
+- Ranked #1 by this run's ranking (significance, then fold-stability, then out-of-sample expectancy/PF): **momentum**. **This is NOT the strategy actually active in paper trading.** `breakout` is the active strategy -- run `python -m src.stocks.strategy_registry list` for the live active strategy and the specific recorded rationale: breakout's per-trade edge (out-of-sample PF 1.66 vs momentum's 1.29, expectancy 1.13% vs 0.64%) was judged to outweigh momentum's higher fold-stability (5/5 folds vs breakout's 3/5) -- a close, deliberate call, not an oversight. Both are validated `LIVE_CANDIDATE`s; momentum is documented as the strongest available fallback if breakout's live performance degrades.
 
 ## Baselines
 
@@ -25,131 +26,131 @@ Generated: 2026-09-03T20:45:00.077783+00:00
 
 | Strategy | Significant | Combined N | OOS N | OOS PF | OOS Expectancy% | Fold Stability | Beats B&H (Sharpe) |
 |---|---|---|---|---|---|---|---|
-| breakout | ✓ | 1237 | 288 | 1.58 | 1.00 | 1.0 | ✗ |
-| momentum | ✓ | 3662 | 1142 | 1.22 | 0.48 | 1.0 | ✗ |
-| relative_volume | ✓ | 1901 | 553 | 1.14 | 0.33 | 0.8 | ✗ |
-| pullback | ✓ | 3872 | 1074 | 1.05 | 0.12 | 0.8 | ✗ |
-| mean_reversion | ✓ | 401 | 87 | 0.94 | -0.11 | 0.8 | ✗ |
+| momentum | ✓ | 3545 | 1102 | 1.29 | 0.64 | 1.0 | ✗ |
+| pullback | ✓ | 3826 | 1063 | 1.08 | 0.16 | 0.8 | ✗ |
+| mean_reversion | ✓ | 401 | 87 | 1.02 | 0.05 | 0.8 | ✗ |
+| breakout | ✓ | 1230 | 286 | 1.66 | 1.13 | 0.6 | ✗ |
+| relative_volume | ✓ | 1894 | 551 | 1.07 | 0.16 | 0.6 | ✗ |
 
 ## In-sample / Out-of-sample / Walk-forward detail (per strategy)
 
 ### momentum
 
-- **Combined**: n=3662, win%=46.90, PF=1.24, expectancy%=0.50, Sharpe=0.08, Sortino=0.14, maxDD%=180.34
-- **In-sample**: n=2520, win%=47.20, PF=1.24, expectancy%=0.50, Sharpe=0.08, Sortino=0.14, maxDD%=182.66
-- **Out-of-sample**: n=1142, win%=46.30, PF=1.22, expectancy%=0.48, Sharpe=0.08, Sortino=0.14, maxDD%=95.80
+- **Combined**: n=3545, win%=45.50, PF=1.24, expectancy%=0.51, Sharpe=0.08, Sortino=0.14, maxDD%=202.22
+- **In-sample**: n=2443, win%=45.70, PF=1.22, expectancy%=0.45, Sharpe=0.07, Sortino=0.13, maxDD%=203.95
+- **Out-of-sample**: n=1102, win%=44.90, PF=1.29, expectancy%=0.64, Sharpe=0.09, Sortino=0.18, maxDD%=95.29
 - **Fold stability score**: 1.0 (fraction of the 5 walk-forward folds where this strategy was both profitable and PF>1)
 - **By market regime** (buckets with ≥10 trades only):
-  - BULLISH_LOW: n=1510, expectancy%=0.68, PF=1.35
-  - SIDEWAYS_LOW: n=1579, expectancy%=0.27, PF=1.13
-  - BEARISH_LOW: n=32, expectancy%=0.90, PF=1.54
-  - SIDEWAYS_HIGH: n=155, expectancy%=1.05, PF=1.44
-  - BEARISH_HIGH: n=70, expectancy%=1.44, PF=1.55
-  - BULLISH_HIGH: n=316, expectancy%=0.22, PF=1.08
+  - SIDEWAYS_LOW: n=1532, expectancy%=0.31, PF=1.15
+  - BEARISH_LOW: n=33, expectancy%=0.01, PF=1.00
+  - BULLISH_LOW: n=1462, expectancy%=0.77, PF=1.40
+  - BULLISH_HIGH: n=311, expectancy%=-0.03, PF=0.99
+  - SIDEWAYS_HIGH: n=143, expectancy%=0.77, PF=1.33
+  - BEARISH_HIGH: n=64, expectancy%=1.43, PF=1.58
 - **Live-readiness verdict**: **LIVE_CANDIDATE**
-  - ✓ enough_combined_trades: 3662 (threshold 20)
-  - ✓ enough_out_of_sample_trades: 1142 (threshold 10)
-  - ✓ positive_out_of_sample_expectancy: 0.48 (threshold 0)
-  - ✓ out_of_sample_profit_factor_above_threshold: 1.22 (threshold 1.15)
-  - ✓ return_to_drawdown_ratio_above_threshold: 10.08 (threshold 2.00)
+  - ✓ enough_combined_trades: 3545 (threshold 20)
+  - ✓ enough_out_of_sample_trades: 1102 (threshold 10)
+  - ✓ positive_out_of_sample_expectancy: 0.64 (threshold 0)
+  - ✓ out_of_sample_profit_factor_above_threshold: 1.29 (threshold 1.15)
+  - ✓ return_to_drawdown_ratio_above_threshold: 8.87 (threshold 2.00)
   - ✓ stable_across_walk_forward_folds: 1.00 (threshold 0.60)
 
 ### breakout
 
-- **Combined**: n=1237, win%=47.00, PF=1.29, expectancy%=0.49, Sharpe=0.10, Sortino=0.18, maxDD%=95.35
-- **In-sample**: n=949, win%=45.90, PF=1.20, expectancy%=0.34, Sharpe=0.07, Sortino=0.12, maxDD%=92.27
-- **Out-of-sample**: n=288, win%=50.30, PF=1.58, expectancy%=1.00, Sharpe=0.18, Sortino=0.37, maxDD%=55.38
-- **Fold stability score**: 1.0 (fraction of the 5 walk-forward folds where this strategy was both profitable and PF>1)
+- **Combined**: n=1230, win%=44.90, PF=1.25, expectancy%=0.41, Sharpe=0.08, Sortino=0.15, maxDD%=93.10
+- **In-sample**: n=944, win%=43.90, PF=1.12, expectancy%=0.19, Sharpe=0.04, Sortino=0.07, maxDD%=69.44
+- **Out-of-sample**: n=286, win%=48.30, PF=1.66, expectancy%=1.13, Sharpe=0.18, Sortino=0.42, maxDD%=68.89
+- **Fold stability score**: 0.6 (fraction of the 5 walk-forward folds where this strategy was both profitable and PF>1)
 - **By market regime** (buckets with ≥10 trades only):
-  - SIDEWAYS_LOW: n=619, expectancy%=0.35, PF=1.23
-  - BULLISH_LOW: n=478, expectancy%=0.66, PF=1.40
-  - BULLISH_HIGH: n=62, expectancy%=0.73, PF=1.31
-  - BEARISH_HIGH: n=24, expectancy%=-0.74, PF=0.73
-  - SIDEWAYS_HIGH: n=45, expectancy%=1.17, PF=1.53
+  - SIDEWAYS_LOW: n=617, expectancy%=0.29, PF=1.19
+  - BULLISH_LOW: n=473, expectancy%=0.50, PF=1.30
+  - BULLISH_HIGH: n=62, expectancy%=1.05, PF=1.45
+  - BEARISH_HIGH: n=24, expectancy%=-0.98, PF=0.65
+  - SIDEWAYS_HIGH: n=45, expectancy%=1.30, PF=1.59
 - **Live-readiness verdict**: **LIVE_CANDIDATE**
-  - ✓ enough_combined_trades: 1237 (threshold 20)
-  - ✓ enough_out_of_sample_trades: 288 (threshold 10)
-  - ✓ positive_out_of_sample_expectancy: 1.00 (threshold 0)
-  - ✓ out_of_sample_profit_factor_above_threshold: 1.58 (threshold 1.15)
-  - ✓ return_to_drawdown_ratio_above_threshold: 6.36 (threshold 2.00)
-  - ✓ stable_across_walk_forward_folds: 1.00 (threshold 0.60)
+  - ✓ enough_combined_trades: 1230 (threshold 20)
+  - ✓ enough_out_of_sample_trades: 286 (threshold 10)
+  - ✓ positive_out_of_sample_expectancy: 1.13 (threshold 0)
+  - ✓ out_of_sample_profit_factor_above_threshold: 1.66 (threshold 1.15)
+  - ✓ return_to_drawdown_ratio_above_threshold: 5.44 (threshold 2.00)
+  - ✓ stable_across_walk_forward_folds: 0.60 (threshold 0.60)
 
 ### mean_reversion
 
-- **Combined**: n=401, win%=44.10, PF=1.15, expectancy%=0.24, Sharpe=0.06, Sortino=0.11, maxDD%=44.31
-- **In-sample**: n=314, win%=45.20, PF=1.23, expectancy%=0.33, Sharpe=0.09, Sortino=0.16, maxDD%=39.07
-- **Out-of-sample**: n=87, win%=40.20, PF=0.94, expectancy%=-0.11, Sharpe=-0.03, Sortino=-0.04, maxDD%=44.07
+- **Combined**: n=401, win%=41.60, PF=1.13, expectancy%=0.20, Sharpe=0.05, Sortino=0.09, maxDD%=80.62
+- **In-sample**: n=314, win%=42.40, PF=1.17, expectancy%=0.25, Sharpe=0.07, Sortino=0.12, maxDD%=50.58
+- **Out-of-sample**: n=87, win%=39.10, PF=1.02, expectancy%=0.05, Sharpe=0.01, Sortino=0.02, maxDD%=44.52
 - **Fold stability score**: 0.8 (fraction of the 5 walk-forward folds where this strategy was both profitable and PF>1)
 - **By market regime** (buckets with ≥10 trades only):
-  - SIDEWAYS_LOW: n=243, expectancy%=0.23, PF=1.16
-  - BEARISH_LOW: n=60, expectancy%=0.60, PF=1.42
-  - BULLISH_LOW: n=31, expectancy%=-0.63, PF=0.66
+  - BULLISH_LOW: n=31, expectancy%=-0.57, PF=0.68
   - BEARISH_HIGH: n=53, expectancy%=0.25, PF=1.14
-  - SIDEWAYS_HIGH: n=13, expectancy%=0.03, PF=1.02
+  - SIDEWAYS_LOW: n=242, expectancy%=0.18, PF=1.12
+  - BEARISH_LOW: n=60, expectancy%=0.63, PF=1.46
+  - SIDEWAYS_HIGH: n=14, expectancy%=-0.21, PF=0.86
 - **Live-readiness verdict**: **NOT_READY**
   - ✓ enough_combined_trades: 401 (threshold 20)
   - ✓ enough_out_of_sample_trades: 87 (threshold 10)
-  - ✗ positive_out_of_sample_expectancy: -0.11 (threshold 0)
-  - ✗ out_of_sample_profit_factor_above_threshold: 0.94 (threshold 1.15)
-  - ✓ return_to_drawdown_ratio_above_threshold: 2.13 (threshold 2.00)
+  - ✓ positive_out_of_sample_expectancy: 0.05 (threshold 0)
+  - ✗ out_of_sample_profit_factor_above_threshold: 1.02 (threshold 1.15)
+  - ✗ return_to_drawdown_ratio_above_threshold: 1.00 (threshold 2.00)
   - ✓ stable_across_walk_forward_folds: 0.80 (threshold 0.60)
 
 ### pullback
 
-- **Combined**: n=3872, win%=45.00, PF=1.15, expectancy%=0.28, Sharpe=0.06, Sortino=0.09, maxDD%=219.62
-- **In-sample**: n=2798, win%=45.60, PF=1.20, expectancy%=0.34, Sharpe=0.07, Sortino=0.12, maxDD%=219.45
-- **Out-of-sample**: n=1074, win%=43.50, PF=1.05, expectancy%=0.12, Sharpe=0.02, Sortino=0.03, maxDD%=100.50
+- **Combined**: n=3826, win%=43.60, PF=1.19, expectancy%=0.35, Sharpe=0.06, Sortino=0.12, maxDD%=220.87
+- **In-sample**: n=2763, win%=44.00, PF=1.25, expectancy%=0.43, Sharpe=0.08, Sortino=0.16, maxDD%=167.74
+- **Out-of-sample**: n=1063, win%=42.60, PF=1.08, expectancy%=0.16, Sharpe=0.03, Sortino=0.05, maxDD%=138.87
 - **Fold stability score**: 0.8 (fraction of the 5 walk-forward folds where this strategy was both profitable and PF>1)
 - **By market regime** (buckets with ≥10 trades only):
-  - SIDEWAYS_LOW: n=2238, expectancy%=0.17, PF=1.10
-  - BEARISH_LOW: n=115, expectancy%=-0.36, PF=0.83
-  - BULLISH_LOW: n=1014, expectancy%=0.54, PF=1.34
-  - SIDEWAYS_HIGH: n=186, expectancy%=0.22, PF=1.09
-  - BULLISH_HIGH: n=216, expectancy%=1.12, PF=1.50
-  - BEARISH_HIGH: n=103, expectancy%=-0.93, PF=0.68
+  - SIDEWAYS_LOW: n=2209, expectancy%=0.27, PF=1.16
+  - BEARISH_LOW: n=113, expectancy%=-0.21, PF=0.90
+  - BULLISH_LOW: n=1005, expectancy%=0.58, PF=1.36
+  - SIDEWAYS_HIGH: n=185, expectancy%=0.27, PF=1.11
+  - BULLISH_HIGH: n=212, expectancy%=1.16, PF=1.52
+  - BEARISH_HIGH: n=102, expectancy%=-1.02, PF=0.65
 - **Live-readiness verdict**: **NOT_READY**
-  - ✓ enough_combined_trades: 3872 (threshold 20)
-  - ✓ enough_out_of_sample_trades: 1074 (threshold 10)
-  - ✓ positive_out_of_sample_expectancy: 0.12 (threshold 0)
-  - ✗ out_of_sample_profit_factor_above_threshold: 1.05 (threshold 1.15)
-  - ✓ return_to_drawdown_ratio_above_threshold: 4.90 (threshold 2.00)
+  - ✓ enough_combined_trades: 3826 (threshold 20)
+  - ✓ enough_out_of_sample_trades: 1063 (threshold 10)
+  - ✓ positive_out_of_sample_expectancy: 0.16 (threshold 0)
+  - ✗ out_of_sample_profit_factor_above_threshold: 1.08 (threshold 1.15)
+  - ✓ return_to_drawdown_ratio_above_threshold: 6.13 (threshold 2.00)
   - ✓ stable_across_walk_forward_folds: 0.80 (threshold 0.60)
 
 ### relative_volume
 
-- **Combined**: n=1901, win%=43.90, PF=1.14, expectancy%=0.36, Sharpe=0.05, Sortino=0.08, maxDD%=210.59
-- **In-sample**: n=1348, win%=43.30, PF=1.14, expectancy%=0.37, Sharpe=0.05, Sortino=0.08, maxDD%=209.40
-- **Out-of-sample**: n=553, win%=45.20, PF=1.14, expectancy%=0.33, Sharpe=0.05, Sortino=0.09, maxDD%=111.77
-- **Fold stability score**: 0.8 (fraction of the 5 walk-forward folds where this strategy was both profitable and PF>1)
+- **Combined**: n=1894, win%=42.30, PF=1.09, expectancy%=0.22, Sharpe=0.03, Sortino=0.05, maxDD%=316.02
+- **In-sample**: n=1343, win%=41.70, PF=1.09, expectancy%=0.24, Sharpe=0.03, Sortino=0.05, maxDD%=309.67
+- **Out-of-sample**: n=551, win%=43.70, PF=1.07, expectancy%=0.16, Sharpe=0.03, Sortino=0.04, maxDD%=139.23
+- **Fold stability score**: 0.6 (fraction of the 5 walk-forward folds where this strategy was both profitable and PF>1)
 - **By market regime** (buckets with ≥10 trades only):
-  - SIDEWAYS_LOW: n=889, expectancy%=0.44, PF=1.19
-  - BULLISH_LOW: n=564, expectancy%=-0.07, PF=0.97
-  - BEARISH_LOW: n=39, expectancy%=-0.45, PF=0.83
-  - BEARISH_HIGH: n=230, expectancy%=1.28, PF=1.44
-  - BULLISH_HIGH: n=107, expectancy%=0.32, PF=1.09
-  - SIDEWAYS_HIGH: n=72, expectancy%=0.25, PF=1.08
+  - BEARISH_LOW: n=39, expectancy%=-0.06, PF=0.98
+  - SIDEWAYS_LOW: n=886, expectancy%=0.36, PF=1.15
+  - BEARISH_HIGH: n=230, expectancy%=1.25, PF=1.44
+  - BULLISH_LOW: n=562, expectancy%=-0.36, PF=0.85
+  - BULLISH_HIGH: n=105, expectancy%=0.89, PF=1.27
+  - SIDEWAYS_HIGH: n=72, expectancy%=-1.20, PF=0.65
 - **Live-readiness verdict**: **NOT_READY**
-  - ✓ enough_combined_trades: 1901 (threshold 20)
-  - ✓ enough_out_of_sample_trades: 553 (threshold 10)
-  - ✓ positive_out_of_sample_expectancy: 0.33 (threshold 0)
-  - ✗ out_of_sample_profit_factor_above_threshold: 1.14 (threshold 1.15)
-  - ✓ return_to_drawdown_ratio_above_threshold: 3.25 (threshold 2.00)
-  - ✓ stable_across_walk_forward_folds: 0.80 (threshold 0.60)
+  - ✓ enough_combined_trades: 1894 (threshold 20)
+  - ✓ enough_out_of_sample_trades: 551 (threshold 10)
+  - ✓ positive_out_of_sample_expectancy: 0.16 (threshold 0)
+  - ✗ out_of_sample_profit_factor_above_threshold: 1.07 (threshold 1.15)
+  - ✗ return_to_drawdown_ratio_above_threshold: 1.29 (threshold 2.00)
+  - ✓ stable_across_walk_forward_folds: 0.60 (threshold 0.60)
 
-## Parameter sensitivity check -- breakout
+## Parameter sensitivity check -- momentum
 
 Re-backtested with alternate parameter values (see `scripts/research_stocks_strategies.py`'s `_PARAM_GRIDS`), ranked by cross-fold stability first, raw profit factor second -- a config that only wins because of one specific threshold, or only in one fold, is exactly what this check exists to surface rather than reward.
 
 | Params | Trades | PF | Fold Stability |
 |---|---|---|---|
-| {'MIN_RELATIVE_VOLUME': 1.5, 'NEAR_HIGH_PCT_THRESHOLD': -1.0} | 2018 | 1.31 | 1.0 |
-| {'MIN_RELATIVE_VOLUME': 1.5, 'NEAR_HIGH_PCT_THRESHOLD': -0.5} | 1237 | 1.29 | 1.0 |
-| {'MIN_RELATIVE_VOLUME': 1.2, 'NEAR_HIGH_PCT_THRESHOLD': -1.0} | 3518 | 1.27 | 1.0 |
-| {'MIN_RELATIVE_VOLUME': 1.2, 'NEAR_HIGH_PCT_THRESHOLD': -0.5} | 2324 | 1.23 | 0.8 |
-| {'MIN_RELATIVE_VOLUME': 2.5, 'NEAR_HIGH_PCT_THRESHOLD': -1.0} | 466 | 1.23 | 0.8 |
-| {'MIN_RELATIVE_VOLUME': 2.5, 'NEAR_HIGH_PCT_THRESHOLD': -0.5} | 267 | 1.18 | 0.8 |
-| {'MIN_RELATIVE_VOLUME': 1.2, 'NEAR_HIGH_PCT_THRESHOLD': -0.25} | 1402 | 1.16 | 0.8 |
-| {'MIN_RELATIVE_VOLUME': 2.0, 'NEAR_HIGH_PCT_THRESHOLD': -1.0} | 912 | 1.13 | 0.6 |
+| {'MIN_RELATIVE_VOLUME': 1.0, 'MAX_RSI': 72.0} | 3650 | 1.27 | 1.0 |
+| {'MIN_RELATIVE_VOLUME': 1.0, 'MAX_RSI': 78.0} | 4107 | 1.25 | 1.0 |
+| {'MIN_RELATIVE_VOLUME': 1.0, 'MAX_RSI': 85.0} | 4281 | 1.24 | 1.0 |
+| {'MIN_RELATIVE_VOLUME': 1.1, 'MAX_RSI': 78.0} | 3545 | 1.24 | 1.0 |
+| {'MIN_RELATIVE_VOLUME': 1.3, 'MAX_RSI': 78.0} | 2627 | 1.24 | 1.0 |
+| {'MIN_RELATIVE_VOLUME': 1.3, 'MAX_RSI': 85.0} | 2794 | 1.24 | 1.0 |
+| {'MIN_RELATIVE_VOLUME': 1.1, 'MAX_RSI': 85.0} | 3727 | 1.22 | 1.0 |
+| {'MIN_RELATIVE_VOLUME': 1.3, 'MAX_RSI': 72.0} | 2178 | 1.27 | 0.8 |
 
 ## Survivorship-bias disclosure
 

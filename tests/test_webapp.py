@@ -354,6 +354,159 @@ class TestStocksProcessControlIsReal(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestBuildStocksDashboard(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(webapp_module, "is_stocks_running", return_value=True)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+    def _enter_patches(self, patches):
+        """A `with`-able bundle of an arbitrary-length list of
+        mock.patch(...) context managers (contextlib.ExitStack), so
+        _patch_common() below can freely add/remove patches without
+        every call site needing to name each one individually -- a
+        fixed `with p[0], p[1], ...:` list once silently dropped a
+        newly-added patch because a call site wasn't updated to include
+        it (see the incident this fixes: _read_last_cycle wasn't
+        actually mocked, and a test read the real production
+        last_cycle.json).
+        """
+        import contextlib
+        stack = contextlib.ExitStack()
+        for p in patches:
+            stack.enter_context(p)
+        return stack
+
+    def _patch_common(self, state=None, last_cycle=None, versions=None, active_strategy="breakout",
+                       learning_state=None, health_state=None, x_configured=False):
+        state = state if state is not None else {"open_positions": [], "closed_trades": [], "daily_pnl_usd": {}}
+        learning_state = learning_state or {"last_run_at": None, "last_action": None, "last_action_reason": None, "history": []}
+        health_state = health_state or {"status": "RUNNING", "last_success_at": "t", "consecutive_failures": 0,
+                                         "recovery_attempts_total": 0, "outage_started_at": None,
+                                         "outage_reason": None, "last_recovery_at": None, "process_started_at": None}
+        return [
+            mock.patch("src.stocks.paper_broker.load_state", return_value=state),
+            mock.patch("src.stocks.strategy_registry.get_active_strategy", return_value=active_strategy),
+            mock.patch("src.stocks.strategy_registry.list_versions", return_value=versions or []),
+            mock.patch("src.stocks.learning_engine.get_learning_state", return_value=learning_state),
+            mock.patch("src.stocks.health.load_health", return_value=health_state),
+            mock.patch("src.x_client.is_configured", return_value=x_configured),
+            mock.patch.object(webapp_module, "_read_last_cycle", return_value=last_cycle),
+        ]
+
+    def test_empty_state_is_fully_shaped_and_never_raises(self):
+        patches = self._patch_common()
+        with self._enter_patches(patches):
+            d = webapp_module.build_stocks_dashboard()
+
+        self.assertFalse(d["live_trading"])
+        self.assertIn(d["market_status"], ("OPEN", "PRE_MARKET", "AFTER_HOURS", "CLOSED"))
+        self.assertEqual(d["overview"]["open_position_count"], 0)
+        self.assertEqual(d["overview"]["closed_trade_count"], 0)
+        self.assertEqual(d["opportunities"], [])
+        self.assertEqual(d["positions"], [])
+        self.assertEqual(d["trades"], [])
+        self.assertEqual(d["performance"]["equity_curve"], [])
+        self.assertIsNone(d["overview"]["win_rate_pct"])
+
+    def test_open_position_with_a_live_price_shows_unrealized_pnl(self):
+        state = {
+            "open_positions": [{"symbol": "AAPL", "entry_price": 100.0, "last_price": 110.0, "shares": 10.0,
+                                 "size_usd": 1000.0, "opened_at": "2026-01-01T00:00:00+00:00", "strategy": "breakout",
+                                 "entry_score": 70, "stop_loss_price": 95.0, "take_profit_price": 120.0}],
+            "closed_trades": [], "daily_pnl_usd": {},
+        }
+        patches = self._patch_common(state=state)
+        with self._enter_patches(patches):
+            d = webapp_module.build_stocks_dashboard()
+
+        self.assertEqual(d["overview"]["unrealized_pnl_usd"], 100.0)
+        self.assertEqual(d["positions"][0]["unrealized_pnl_usd"], 100.0)
+        self.assertAlmostEqual(d["positions"][0]["unrealized_pnl_pct"], 10.0)
+
+    def test_open_position_without_a_live_price_yet_shows_none_not_zero(self):
+        state = {
+            "open_positions": [{"symbol": "AAPL", "entry_price": 100.0, "last_price": None, "shares": 10.0,
+                                 "size_usd": 1000.0, "opened_at": "2026-01-01T00:00:00+00:00"}],
+            "closed_trades": [], "daily_pnl_usd": {},
+        }
+        patches = self._patch_common(state=state)
+        with self._enter_patches(patches):
+            d = webapp_module.build_stocks_dashboard()
+
+        self.assertIsNone(d["positions"][0]["unrealized_pnl_usd"])
+        self.assertEqual(d["overview"]["unrealized_pnl_usd"], 0.0)  # excluded from the sum, not treated as a real zero
+
+    def test_closed_trades_feed_performance_series_and_overview_metrics(self):
+        closed = [
+            {"symbol": "AAPL", "pnl_usd": 50.0, "pnl_pct": 5.0, "opened_at": "2026-01-01T00:00:00+00:00",
+             "closed_at": "2026-01-02T00:00:00+00:00", "strategy": "breakout", "reason": "take_profit",
+             "regime_snapshot": {"trend": "BULLISH"}},
+            {"symbol": "MSFT", "pnl_usd": -20.0, "pnl_pct": -2.0, "opened_at": "2026-01-02T00:00:00+00:00",
+             "closed_at": "2026-01-03T00:00:00+00:00", "strategy": "breakout", "reason": "stop_loss",
+             "regime_snapshot": {"trend": "SIDEWAYS"}},
+        ]
+        state = {"open_positions": [], "closed_trades": closed, "daily_pnl_usd": {webapp_module._today_key(): -20.0}}
+        patches = self._patch_common(state=state)
+        with self._enter_patches(patches):
+            d = webapp_module.build_stocks_dashboard()
+
+        self.assertEqual(d["overview"]["closed_trade_count"], 2)
+        self.assertEqual(d["overview"]["realized_pnl_usd"], 30.0)
+        self.assertEqual(len(d["performance"]["equity_curve"]), 2)
+        self.assertEqual(d["performance"]["equity_curve"][-1]["v"], 10030.0)  # starting 10000 + net 30
+        self.assertIn("breakout", d["performance"]["by_strategy"])
+        self.assertIn("BULLISH", d["performance"]["by_regime"])
+
+    def test_large_pnl_values_are_formatted_not_left_as_raw_floats_or_crashing(self):
+        closed = [{"symbol": "X", "pnl_usd": 1234567.891, "pnl_pct": 999.999,
+                   "opened_at": "2026-01-01T00:00:00+00:00", "closed_at": "2026-01-02T00:00:00+00:00"}]
+        state = {"open_positions": [], "closed_trades": closed, "daily_pnl_usd": {}}
+        patches = self._patch_common(state=state)
+        with self._enter_patches(patches):
+            d = webapp_module.build_stocks_dashboard()
+        self.assertEqual(d["overview"]["realized_pnl_usd"], 1234567.89)
+
+    def test_x_disabled_reports_unavailable_not_broken(self):
+        patches = self._patch_common(x_configured=False)
+        with self._enter_patches(patches):
+            d = webapp_module.build_stocks_dashboard()
+        self.assertFalse(d["market_intelligence"]["x_status"]["configured"])
+
+    def test_scanner_stopped_is_reflected_in_process_running_and_overview(self):
+        with mock.patch.object(webapp_module, "is_stocks_running", return_value=False):
+            patches = self._patch_common()
+            with self._enter_patches(patches):
+                d = webapp_module.build_stocks_dashboard()
+        self.assertFalse(d["process_running"])
+        self.assertEqual(d["overview"]["system_state"], "STOPPED")
+
+    def test_a_lookup_failure_anywhere_returns_the_safe_empty_shape(self):
+        with mock.patch("src.stocks.paper_broker.load_state", side_effect=RuntimeError("disk error")):
+            d = webapp_module.build_stocks_dashboard()
+        self.assertFalse(d["live_trading"])
+        self.assertEqual(d["positions"], [])
+        self.assertEqual(d["overview"]["system_state"], "STOPPED")
+
+    def test_degraded_health_status_sets_has_problem(self):
+        health_state = {"status": "DEGRADED", "last_success_at": "t", "consecutive_failures": 6,
+                         "recovery_attempts_total": 6, "outage_started_at": "t2",
+                         "outage_reason": "timeout", "last_recovery_at": None, "process_started_at": None}
+        patches = self._patch_common(health_state=health_state)
+        with self._enter_patches(patches):
+            d = webapp_module.build_stocks_dashboard()
+        self.assertTrue(d["overview"]["has_problem"])
+
+    def test_learning_history_is_surfaced_in_the_learning_section(self):
+        learning_state = {"last_run_at": "t", "last_action": "adopted", "last_action_reason": "breakout beat momentum",
+                           "history": [{"at": "t", "action": "adopted", "reason": "x"}]}
+        patches = self._patch_common(learning_state=learning_state)
+        with self._enter_patches(patches):
+            d = webapp_module.build_stocks_dashboard()
+        self.assertEqual(d["learning"]["last_action"], "adopted")
+        self.assertEqual(d["overview"]["learning_status"], "adopted")
+
+
 class TestStocksRoutes(unittest.TestCase):
     def setUp(self):
         webapp_module.app.testing = True
@@ -381,6 +534,29 @@ class TestStocksRoutes(unittest.TestCase):
             response = self.client.post("/api/stocks/stop")
 
         mock_stop.assert_called_once()
+        self.assertTrue(response.get_json()["ok"])
+
+    def test_stocks_dashboard_page_serves_and_is_rtl_arabic(self):
+        response = self.client.get("/stocks")
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('dir="rtl"', html)
+        self.assertIn('lang="ar"', html)
+
+    def test_stocks_dashboard_endpoint_calls_build_stocks_dashboard(self):
+        with mock.patch.object(webapp_module, "build_stocks_dashboard", return_value={"ok": True}):
+            response = self.client.get("/api/stocks/dashboard")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"ok": True})
+
+    def test_stocks_restart_endpoint_stops_then_starts(self):
+        call_order = []
+        with mock.patch.object(webapp_module, "stop_stocks", side_effect=lambda: call_order.append("stop") or (True, "توقف")), \
+                mock.patch.object(webapp_module, "start_stocks", side_effect=lambda: call_order.append("start") or (True, "بدأ")), \
+                mock.patch.object(webapp_module, "build_stocks_dashboard", return_value={}):
+            response = self.client.post("/api/stocks/restart")
+
+        self.assertEqual(call_order, ["stop", "start"])
         self.assertTrue(response.get_json()["ok"])
 
 
@@ -459,6 +635,66 @@ class TestDashboardHasARequestTimeout(unittest.TestCase):
     def test_timeout_error_produces_a_clear_arabic_message_not_a_silent_hang(self):
         self.assertIn("AbortError", self.html)
         self.assertIn("انتهت مهلة", self.html)
+
+
+class TestStocksDashboardPageIsSound(unittest.TestCase):
+    """Same source-text-check discipline as TestDashboardHasARequestTimeout
+    above, applied to the new full /stocks page -- it's a much larger
+    page with its own polling loop and its own set of control buttons,
+    and must not have quietly skipped the timeout-wrapper convention the
+    original dashboard already established.
+    """
+
+    def setUp(self):
+        self.html = (PROJECT_ROOT / "webapp" / "templates" / "stocks_dashboard.html").read_text(encoding="utf-8")
+
+    def test_is_rtl_arabic(self):
+        self.assertIn('lang="ar"', self.html)
+        self.assertIn('dir="rtl"', self.html)
+
+    def test_uses_abort_controller_with_a_timeout(self):
+        self.assertIn("AbortController", self.html)
+        self.assertIn("controller.signal", self.html)
+        self.assertIn("ACTION_TIMEOUT_MS", self.html)
+        self.assertIn("STATUS_TIMEOUT_MS", self.html)
+
+    def test_every_fetch_call_goes_through_the_timeout_wrapper(self):
+        raw_fetch_lines = [line for line in self.html.splitlines() if "fetch(" in line and "fetchWithTimeout(" not in line]
+        self.assertEqual(len(raw_fetch_lines), 1, f"expected exactly one raw fetch() call (the wrapper's own): {raw_fetch_lines!r}")
+        self.assertIn("controller.signal", raw_fetch_lines[0])
+
+    def test_polls_the_new_dashboard_endpoint(self):
+        self.assertIn("/api/stocks/dashboard", self.html)
+
+    def test_control_buttons_call_paper_only_endpoints(self):
+        # No control on this page can reach a live-trading endpoint --
+        # there isn't one to reach, but the page's own action wiring
+        # must still only ever target the paper-only stocks API.
+        for endpoint in ("/api/stocks/start", "/api/stocks/stop", "/api/stocks/restart"):
+            self.assertIn(endpoint, self.html)
+        self.assertNotIn("/api/live", self.html)
+        self.assertNotIn("live_trading=true", self.html.lower())
+
+    def test_live_trading_is_shown_as_permanently_locked_not_a_toggle(self):
+        self.assertIn("Live Trading", self.html)
+        self.assertIn("مقفل دائمًا", self.html)
+        # A literal input/button that could flip live trading must not exist.
+        self.assertNotIn('id="btn-live"', self.html)
+        self.assertNotIn('id="toggle-live"', self.html)
+
+    def test_notifications_never_let_a_render_error_break_the_poll_loop(self):
+        # checkNotifications() is called every refresh() -- it must be
+        # defensively wrapped so a malformed/unexpected payload shape
+        # can't stop the dashboard from continuing to poll.
+        start = self.html.index("function checkNotifications")
+        end = self.html.index("\n}", start)
+        body = self.html[start:end]
+        self.assertIn("try {", body)
+        self.assertIn("catch", body)
+
+    def test_has_every_required_section(self):
+        for section_id in ("overview", "scanner", "positions", "history", "performance", "lab", "learning", "intel", "health"):
+            self.assertIn(f'id="{section_id}"', self.html)
 
 
 class TestLauncherScriptChecksThePortFirst(unittest.TestCase):

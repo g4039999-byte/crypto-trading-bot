@@ -148,11 +148,28 @@ STOCKS_MAX_TRADES_PER_DAY = _get_int("STOCKS_MAX_TRADES_PER_DAY", 10)  # overtra
 
 # --- Exit rules -- ATR-based (volatility-adjusted), not fixed percentages ---
 STOCKS_STOP_LOSS_ATR_MULT = _get_float("STOCKS_STOP_LOSS_ATR_MULT", 1.5)
-STOCKS_TAKE_PROFIT_ATR_MULT = _get_float("STOCKS_TAKE_PROFIT_ATR_MULT", 3.0)
-STOCKS_TRAILING_STOP_ATR_MULT = _get_float("STOCKS_TRAILING_STOP_ATR_MULT", 2.0)
+# TAKE_PROFIT/TRAILING_ARM/TRAILING_STOP defaults below were revised
+# from an earlier 3.0/1.5/2.0 baseline after a systematic 48-combination
+# grid search (src.stocks.backtester + src.stocks.research_pipeline's
+# full walk-forward/out-of-sample/regime rigor -- not just eyeballing
+# the aggregate number) run once the backtester started actually
+# simulating the trailing stop (see backtester.py's module docstring on
+# why that fidelity fix mattered): the original 2.0-ATR trail cut
+# winners short before they could reach a 3.0-ATR target often enough
+# to measurably hurt out-of-sample quality. This wider combination
+# (breakout, the active strategy: out-of-sample PF 1.48->1.66,
+# expectancy 0.75%->1.13%, return-to-drawdown ratio 1.43->5.12, combined
+# drawdown 129%->99% -- better on every axis, not a one-metric trade-off)
+# was chosen from the results that were BOTH LIVE_CANDIDATE-qualifying
+# AND held up across strategies other than the one being tuned on
+# (momentum's own numbers independently improved with the same change,
+# evidence this isn't overfit to breakout specifically) -- see
+# STOCKS_LIVE_READINESS_REPORT.md for the full comparison.
+STOCKS_TAKE_PROFIT_ATR_MULT = _get_float("STOCKS_TAKE_PROFIT_ATR_MULT", 4.0)
+STOCKS_TRAILING_STOP_ATR_MULT = _get_float("STOCKS_TRAILING_STOP_ATR_MULT", 3.0)
 # Trailing stop only arms once price has moved this many ATRs in favor
 # (avoids trailing a position that hasn't even proven itself yet).
-STOCKS_TRAILING_ARM_ATR_MULT = _get_float("STOCKS_TRAILING_ARM_ATR_MULT", 1.5)
+STOCKS_TRAILING_ARM_ATR_MULT = _get_float("STOCKS_TRAILING_ARM_ATR_MULT", 1.0)
 STOCKS_MAX_HOLDING_DAYS = _get_float("STOCKS_MAX_HOLDING_DAYS", 10.0)
 
 # --- Backtesting ---

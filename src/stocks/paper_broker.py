@@ -172,7 +172,13 @@ def _set_trailing_stop(symbol, trailing_stop_price):
 
 def update_mfe_mae(symbol, current_price):
     """Call every monitoring cycle for each open position -- tracks the
-    best/worst price seen so far, used to compute MFE/MAE at close.
+    best/worst price seen so far (used to compute MFE/MAE at close) and
+    the last live price seen (last_price/last_price_at), so the
+    dashboard can show a current price and unrealized P/L for open
+    positions by reading this file -- never making its own live
+    data-provider call -- at the cost of it being at most one loop
+    interval stale, same trade-off src.stocks.engine's last_cycle.json
+    snapshot already makes.
     """
     state = load_state()
     for position in state["open_positions"]:
@@ -180,6 +186,8 @@ def update_mfe_mae(symbol, current_price):
             continue
         position["mfe_price"] = max(position["mfe_price"], current_price)
         position["mae_price"] = min(position["mae_price"], current_price)
+        position["last_price"] = current_price
+        position["last_price_at"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
 
 

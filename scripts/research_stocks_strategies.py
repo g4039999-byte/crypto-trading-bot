@@ -112,6 +112,12 @@ def _write_markdown_report(report, sensitivity, leading_strategy):
         f"- Total resolved historical trades (all strategies combined): **{report['total_trades_across_all_strategies']}**",
         f"- Costs modeled: {report['costs_modeled']['slippage_bps']} bps slippage, "
         f"${report['costs_modeled']['commission_per_trade_usd']} commission/trade (round-trip)",
+        f"- Ranked #1 by this run's ranking (significance, then fold-stability, then out-of-sample "
+        f"expectancy/PF): **{report['ranking'][0]['strategy'] if report['ranking'] else '—'}**. This is NOT "
+        "necessarily the strategy actually active in paper trading -- see `python -m src.stocks.strategy_registry "
+        "list` for the live active strategy and the specific rationale recorded for it (a higher fold-stability "
+        "score alone doesn't always outweigh a substantially higher per-trade edge; see that rationale for the "
+        "actual reasoning behind whichever strategy is active).",
         "",
         "## Baselines",
         "",
