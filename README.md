@@ -344,6 +344,46 @@ a specific account's track record).
 python -m scripts.backtest_x_signals   # synthetic reputation-learning replay
 ```
 
+### Connecting your own X account (optional)
+
+Everything above works with zero X credentials. To actually turn it on
+(2026-09-03 pricing, checked live -- reconfirm on
+[developer.x.com](https://developer.x.com) before relying on this, X
+changes these terms periodically):
+
+1. **Sign in at [developer.x.com](https://developer.x.com)** with your
+   own X account (a phone-verified account is typically required for
+   developer access) and complete the one-time developer profile setup
+   if prompted. *This step needs you personally -- login, any 2FA
+   prompt, and the developer terms acceptance are all things only you
+   can do.*
+2. **Create a Project, then an App inside it** (e.g. project "meme
+   radar", app "x-signal-client"). The **Free** project tier costs
+   nothing and needs no payment method -- but as of 2026 its read
+   limits are extremely tight (effectively near-unusable for
+   continuous polling; X's paid **Basic** tier, ~$200/month, is what
+   real continuous access requires). Start on Free to prove the
+   connection works end to end; decide separately, later, whether the
+   volume is worth paying for -- this project never assumes that
+   decision for you.
+3. **App → "Keys and Tokens" tab → generate the Bearer Token** (App-only
+   auth -- that's all this project uses; it never posts, follows, or
+   writes anything).
+4. **Paste it into `.env`** (project root, already git-ignored) on the
+   `X_BEARER_TOKEN=` line. Never paste it into a chat, an issue, or
+   anywhere else.
+5. Run the one script in this project that deliberately makes a real
+   network call, to confirm the token actually works:
+   ```bash
+   python -m scripts.test_x_connection
+   ```
+   It reports success/failure, shows a couple of real posts fetched,
+   and confirms they were fed through `x_signal_engine` -- all without
+   printing your token back anywhere.
+6. Restart `python -m webapp.app` (or the radar process directly) --
+   `X_BEARER_TOKEN` is read once at process start, so an already-running
+   process needs a restart to pick up a freshly-added token.
+
 ## Live trading (disabled by default -- read this before changing anything)
 
 A safety layer for real execution has been built. `src/wallet.py`'s
