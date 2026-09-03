@@ -20,3 +20,10 @@ itsdangerous==2.2.0
 Jinja2==3.1.6
 MarkupSafe==3.0.3
 Werkzeug==3.1.8
+
+# src/stocks/ -- US-stocks paper-trading subsystem. yfinance is the
+# free, no-account-needed historical/intraday data source (default
+# provider and automatic fallback if Alpaca isn't configured -- see
+# src/stocks/data_provider.py). Alpaca itself needs no extra package,
+# just requests (already above) against its plain REST API.
+yfinance==1.7.0

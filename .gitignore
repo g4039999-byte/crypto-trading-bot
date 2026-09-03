@@ -41,3 +41,12 @@ data/x_signals.json
 data/x_account_reputation.json
 data/x_usage.json
 data/x_poll_state.json
+
+# US-stocks (src/stocks/) runtime state -- same reasoning as every
+# runtime-state entry above: regenerated locally by
+# `python -m src.stocks.run` or the webapp's stocks controls, never
+# contains secrets (ALPACA_API_KEY/ALPACA_API_SECRET live only in .env,
+# already ignored above; paper trading only, STOCKS_LIVE_TRADING is
+# hard-set False in src/stocks/config.py regardless).
+data/stocks/
+data/webapp_stocks.pid

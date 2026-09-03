@@ -25,6 +25,7 @@ What this is and is NOT:
     exposed to the network.
 """
 
+import json
 import logging
 import os
 import signal
@@ -214,6 +215,103 @@ def emergency_stop():
 
 
 # ---------------------------------------------------------------------------
+# Stocks process control -- runs `python -m src.stocks.run --loop`
+# (US stocks, paper trading only) as its own independent background
+# process, entirely separate from the crypto radar above: its own lock,
+# its own PID file, its own Start/Stop. Either system can be started,
+# stopped, or broken without affecting the other. Deliberately a
+# parallel copy of the crypto control-flow above (not a shared helper)
+# so this addition can never risk the crypto side's already-working,
+# already-tested process control.
+# ---------------------------------------------------------------------------
+
+STOCKS_PID_FILE = PROJECT_ROOT / "data" / "webapp_stocks.pid"
+
+_stocks_lock = threading.RLock()
+_managed_stocks_process = None
+
+
+def _write_stocks_pid(pid):
+    STOCKS_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STOCKS_PID_FILE.write_text(str(pid), encoding="utf-8")
+
+
+def _read_stocks_pid():
+    if not STOCKS_PID_FILE.exists():
+        return None
+    try:
+        return int(STOCKS_PID_FILE.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return None
+
+
+def _clear_stocks_pid():
+    try:
+        STOCKS_PID_FILE.unlink()
+    except OSError:
+        pass
+
+
+def is_stocks_running():
+    with _stocks_lock:
+        if _managed_stocks_process is not None and _managed_stocks_process.poll() is None:
+            return True
+    return _pid_is_alive(_read_stocks_pid())
+
+
+def start_stocks():
+    """Start the US-stocks paper-trading loop. Always paper -- there is
+    no --live flag on src.stocks.run, and STOCKS_LIVE_TRADING is
+    hard-set False at the source level (src/stocks/config.py); nothing
+    here can place a real brokerage order regardless of what's clicked.
+    Returns (ok: bool, message_ar: str).
+    """
+    global _managed_stocks_process
+    with _stocks_lock:
+        if is_stocks_running():
+            return False, "تداول الأسهم يعمل بالفعل."
+
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if _is_windows() else 0
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "src.stocks.run", "--loop"],
+                cwd=str(PROJECT_ROOT),
+                creationflags=creationflags,
+            )
+        except OSError as exc:
+            logger.exception("Failed to start the stocks process")
+            return False, f"تعذّر بدء تداول الأسهم: {exc}"
+
+        _managed_stocks_process = proc
+        _write_stocks_pid(proc.pid)
+        logger.warning("Web UI: stocks paper loop started (pid=%s)", proc.pid)
+        return True, "تم بدء التداول التجريبي للأسهم الأمريكية بنجاح."
+
+
+def stop_stocks():
+    """Stop the running stocks loop, if any. Returns (ok, message_ar)."""
+    global _managed_stocks_process
+    with _stocks_lock:
+        pid = _managed_stocks_process.pid if _managed_stocks_process is not None else _read_stocks_pid()
+
+        if not _pid_is_alive(pid):
+            _managed_stocks_process = None
+            _clear_stocks_pid()
+            return False, "تداول الأسهم متوقف بالفعل."
+
+        _kill_pid(pid)
+        if _managed_stocks_process is not None:
+            try:
+                _managed_stocks_process.wait(timeout=5)
+            except Exception:
+                pass
+        _managed_stocks_process = None
+        _clear_stocks_pid()
+        logger.warning("Web UI: stocks paper loop stopped (pid=%s)", pid)
+        return True, "تم إيقاف تداول الأسهم."
+
+
+# ---------------------------------------------------------------------------
 # Read-only data for the dashboard -- Arabic labels for display only, the
 # underlying values (status/trend/event_type/...) are exactly what the
 # existing project modules already produce.
@@ -284,6 +382,92 @@ def _short_address(address):
 def _latest_history(entry):
     history = entry.get("history") or []
     return history[-1] if history else {}
+
+
+def build_stocks_status():
+    """Everything the US-stocks dashboard section needs. Never raises,
+    never makes a live network/data-provider call itself -- reads only
+    data/stocks/*.json (paper positions, the last cycle's own summary
+    written by src.stocks.engine, the strategy registry). A completely
+    fresh install (no cycle has ever run) returns valid, empty-looking
+    data, not an error.
+    """
+    try:
+        from src.stocks.config import STOCKS_LIVE_TRADING, STOCKS_MAX_OPEN_POSITIONS, STOCKS_STARTING_CAPITAL_USD
+        from src.stocks.paper_broker import load_state as load_stocks_state
+        from src.stocks.strategy_registry import get_active_strategy, list_versions
+
+        process_running = is_stocks_running()
+        state = load_stocks_state()
+        open_positions = state.get("open_positions", [])
+        closed_trades = state.get("closed_trades", [])
+
+        total_pnl = _fmt_money(sum((t.get("pnl_usd") or 0) for t in closed_trades))
+        today_pnl = _fmt_money(state.get("daily_pnl_usd", {}).get(_today_key(), 0.0))
+        deployed = _fmt_money(sum((p.get("size_usd") or 0) for p in open_positions))
+        balance_estimate = _fmt_money(STOCKS_STARTING_CAPITAL_USD + total_pnl)
+        wins = [t for t in closed_trades if (t.get("pnl_usd") or 0) > 0]
+        win_rate = round(100 * len(wins) / len(closed_trades), 1) if closed_trades else None
+        peak_equity = state.get("peak_equity_usd", STOCKS_STARTING_CAPITAL_USD)
+        drawdown_pct = round(max(0.0, (peak_equity - balance_estimate) / peak_equity * 100), 2) if peak_equity else 0.0
+
+        positions_view = [{
+            "symbol": p.get("symbol"), "size_usd": _fmt_money(p.get("size_usd")),
+            "entry_price": p.get("entry_price"), "opened_at": p.get("opened_at"),
+            "strategy": p.get("strategy"), "entry_score": p.get("entry_score"),
+        } for p in open_positions]
+
+        recent_closed = sorted(closed_trades, key=lambda t: t.get("closed_at") or "", reverse=True)[:10]
+        trades_view = [{
+            "symbol": t.get("symbol"), "pnl_usd": _fmt_money(t.get("pnl_usd")),
+            "pnl_pct": round(t.get("pnl_pct"), 2) if t.get("pnl_pct") is not None else None,
+            "is_win": (t.get("pnl_usd") or 0) > 0, "reason": t.get("reason"),
+            "closed_at": t.get("closed_at"), "strategy": t.get("strategy"),
+            "was_correct": t.get("was_correct"),
+        } for t in recent_closed]
+
+        last_cycle_path = PROJECT_ROOT / "data" / "stocks" / "last_cycle.json"
+        last_cycle = None
+        if last_cycle_path.exists():
+            try:
+                last_cycle = json.loads(last_cycle_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                last_cycle = None
+
+        versions = list_versions()
+        last_adopted = versions[-1] if versions else None
+
+        return {
+            "process_running": process_running,
+            "live_trading": STOCKS_LIVE_TRADING,  # always False -- shown so the dashboard can assert it, never toggle it
+            "balance": {
+                "estimated_balance_usd": balance_estimate,
+                "deployed_usd": deployed,
+                "today_pnl_usd": today_pnl,
+                "total_pnl_usd": total_pnl,
+                "starting_capital_usd": _fmt_money(STOCKS_STARTING_CAPITAL_USD),
+                "win_rate_pct": win_rate,
+                "drawdown_pct": drawdown_pct,
+                "closed_trade_count": len(closed_trades),
+            },
+            "open_positions": positions_view,
+            "recent_trades": trades_view,
+            "max_open_positions": STOCKS_MAX_OPEN_POSITIONS,
+            "active_strategy": get_active_strategy(),
+            "last_adopted_version": last_adopted,
+            "last_cycle": last_cycle,
+            "server_time": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception:
+        logger.exception("Failed to build stocks status -- returning a safe empty payload")
+        return {
+            "process_running": False, "live_trading": False,
+            "balance": {"estimated_balance_usd": 0, "deployed_usd": 0, "today_pnl_usd": 0, "total_pnl_usd": 0,
+                        "starting_capital_usd": 0, "win_rate_pct": None, "drawdown_pct": 0, "closed_trade_count": 0},
+            "open_positions": [], "recent_trades": [], "max_open_positions": 0,
+            "active_strategy": None, "last_adopted_version": None, "last_cycle": None,
+            "server_time": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 def build_status():
@@ -436,6 +620,23 @@ def api_stop():
 def api_emergency():
     ok, message = emergency_stop()
     return jsonify({"ok": ok, "message": message, "status": build_status()})
+
+
+@app.route("/api/stocks/status")
+def api_stocks_status():
+    return jsonify(build_stocks_status())
+
+
+@app.route("/api/stocks/start", methods=["POST"])
+def api_stocks_start():
+    ok, message = start_stocks()
+    return jsonify({"ok": ok, "message": message, "status": build_stocks_status()})
+
+
+@app.route("/api/stocks/stop", methods=["POST"])
+def api_stocks_stop():
+    ok, message = stop_stocks()
+    return jsonify({"ok": ok, "message": message, "status": build_stocks_status()})
 
 
 def _port_is_free(host, port):

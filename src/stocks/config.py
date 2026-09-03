@@ -1,0 +1,163 @@
+"""Configuration for the US stocks paper-trading subsystem. Entirely
+separate from src/config.py (the crypto side) -- no shared state, no
+shared env var names, on purpose.
+
+All values overridable via environment variables / a local .env file
+(never committed -- see .env.example), same convention as the crypto
+side. No secrets live in this file; ALPACA_API_KEY/ALPACA_API_SECRET
+are read from the environment only, exactly like SOLANA_PRIVATE_KEY.
+"""
+
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _get_float(name, default):
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _get_int(name, default):
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _get_bool(name, default):
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _get_list(name, default):
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return tuple(s.strip().upper() for s in raw.split(",") if s.strip())
+
+
+# =============================================================================
+# LIVE TRADING -- hard-disabled at the source level, the same
+# defense-in-depth pattern src/wallet.py's EXECUTION_ENABLED_IN_CODE
+# uses: no environment variable can turn this on. Flipping it would
+# require editing this literal line in a code review, not a config
+# change -- and nothing in this project ever has, or will in this
+# session. There is no order-placement code path in src/stocks at all
+# yet; this flag exists so that if/when one is ever built, it starts
+# from "impossible", not "off by default".
+# =============================================================================
+STOCKS_LIVE_TRADING = False
+
+# --- Alpaca (broker + market data) -- optional, free paper trading and
+# market data once you have an account; nothing here has ever been
+# configured or connected in this project. Read src/stocks/alpaca_client.py's
+# module docstring before setting these. ---
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
+ALPACA_ENABLED = _get_bool("ALPACA_ENABLED", True)
+# Paper trading endpoint ONLY -- this project never points at
+# api.alpaca.markets (the live-money base URL), regardless of env vars.
+ALPACA_TRADING_BASE_URL = "https://paper-api.alpaca.markets"
+ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
+ALPACA_REQUEST_TIMEOUT_SECONDS = _get_float("ALPACA_REQUEST_TIMEOUT_SECONDS", 10)
+ALPACA_REQUEST_MAX_RETRIES = _get_int("ALPACA_REQUEST_MAX_RETRIES", 3)
+ALPACA_REQUEST_RETRY_BACKOFF_SECONDS = _get_float("ALPACA_REQUEST_RETRY_BACKOFF_SECONDS", 1.5)
+
+# --- Data provider selection ---
+# "auto" = use Alpaca if configured (broker-grade, real-time), else fall
+# back to yfinance (free, no account needed, slightly delayed/EOD-ish
+# for some endpoints) -- see src/stocks/data_provider.py. Force one
+# explicitly with "alpaca" or "yfinance".
+STOCKS_DATA_PROVIDER = os.getenv("STOCKS_DATA_PROVIDER", "auto").strip().lower()
+
+# --- Universe: what the scanner considers at all ---
+# A curated, liquid, well-known set of large/mid-cap US tickers spanning
+# sectors -- there is no free "most active stocks today" screener
+# without scraping or a paid data feed, so this project scans a fixed
+# universe and ranks *within* it by live volume/volatility/momentum,
+# same spirit as choosing a watchlist by hand. Override with a
+# comma-separated STOCKS_UNIVERSE to scan a different set.
+_DEFAULT_UNIVERSE = (
+    "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AMD,NFLX,AVGO,"
+    "JPM,BAC,WFC,GS,MS,"
+    "XOM,CVX,"
+    "UNH,JNJ,PFE,LLY,"
+    "COST,WMT,HD,NKE,SBUX,MCD,"
+    "BA,CAT,GE,"
+    "CRM,ORCL,ADBE,INTC,QCOM,MU,PLTR,SNOW,SHOP,UBER,ABNB,"
+    "COIN,MARA,RIOT,"
+    "SPY,QQQ,IWM"
+)
+STOCKS_UNIVERSE = _get_list("STOCKS_UNIVERSE", tuple(_DEFAULT_UNIVERSE.split(",")))
+
+# Benchmark/regime reference symbol (broad-market ETF).
+MARKET_REGIME_SYMBOL = os.getenv("MARKET_REGIME_SYMBOL", "SPY")
+
+# --- Continuous mode ---
+# Much slower than the crypto radar's 60s -- individual US equities do
+# not move meaningfully minute to minute the way a brand-new meme coin
+# does, and polling faster just burns API/data budget for no benefit.
+STOCKS_LOOP_INTERVAL_SECONDS = _get_float("STOCKS_LOOP_INTERVAL_SECONDS", 300.0)
+
+# --- First-pass discovery filters (what's even worth scoring) ---
+STOCKS_MIN_PRICE_USD = _get_float("STOCKS_MIN_PRICE_USD", 5.0)
+STOCKS_MAX_PRICE_USD = _get_float("STOCKS_MAX_PRICE_USD", 2000.0)
+STOCKS_MIN_AVG_VOLUME = _get_float("STOCKS_MIN_AVG_VOLUME", 500000.0)  # 20-day avg daily volume
+STOCKS_MIN_RELATIVE_VOLUME = _get_float("STOCKS_MIN_RELATIVE_VOLUME", 1.2)  # today's vol / 20d avg
+STOCKS_MIN_ATR_PCT = _get_float("STOCKS_MIN_ATR_PCT", 0.8)  # ATR14 as % of price -- too quiet = skip
+STOCKS_MAX_ATR_PCT = _get_float("STOCKS_MAX_ATR_PCT", 15.0)  # too wild = skip (halts/news chaos risk)
+STOCKS_MAX_SPREAD_PCT = _get_float("STOCKS_MAX_SPREAD_PCT", 1.0)  # (high-low)/close on the latest bar, a liquidity proxy without a live quote feed
+
+# --- Scoring ---
+STOCKS_MIN_SCORE = _get_int("STOCKS_MIN_SCORE", 55)
+# Bounded bonus X social signal can add -- additive only, never a gate,
+# exactly like the crypto side (src.x_intelligence.score_bonus_for_signal).
+STOCKS_X_SCORE_MAX_BONUS = _get_int("STOCKS_X_SCORE_MAX_BONUS", 8)
+
+# --- Strategy parameters (each strategy module reads only what it needs) ---
+MOMENTUM_LOOKBACK_DAYS = _get_int("MOMENTUM_LOOKBACK_DAYS", 20)
+BREAKOUT_LOOKBACK_DAYS = _get_int("BREAKOUT_LOOKBACK_DAYS", 20)
+MEAN_REVERSION_RSI_PERIOD = _get_int("MEAN_REVERSION_RSI_PERIOD", 14)
+MEAN_REVERSION_RSI_OVERSOLD = _get_float("MEAN_REVERSION_RSI_OVERSOLD", 30.0)
+MEAN_REVERSION_RSI_OVERBOUGHT = _get_float("MEAN_REVERSION_RSI_OVERBOUGHT", 70.0)
+VWAP_RECLAIM_LOOKBACK_BARS = _get_int("VWAP_RECLAIM_LOOKBACK_BARS", 6)
+
+# --- Risk engine ---
+STOCKS_STARTING_CAPITAL_USD = _get_float("STOCKS_STARTING_CAPITAL_USD", 10000.0)
+STOCKS_MAX_POSITION_USD = _get_float("STOCKS_MAX_POSITION_USD", 1500.0)
+STOCKS_MAX_OPEN_POSITIONS = _get_int("STOCKS_MAX_OPEN_POSITIONS", 5)
+STOCKS_MAX_CAPITAL_DEPLOYMENT_PCT = _get_float("STOCKS_MAX_CAPITAL_DEPLOYMENT_PCT", 80.0)
+STOCKS_MAX_DAILY_LOSS_PCT = _get_float("STOCKS_MAX_DAILY_LOSS_PCT", 3.0)
+# Circuit breaker: halt new entries (existing positions still managed)
+# once realized+unrealized drawdown from the peak equity reaches this.
+STOCKS_MAX_DRAWDOWN_PCT = _get_float("STOCKS_MAX_DRAWDOWN_PCT", 10.0)
+STOCKS_MAX_TRADES_PER_DAY = _get_int("STOCKS_MAX_TRADES_PER_DAY", 10)  # overtrading guard
+
+# --- Exit rules -- ATR-based (volatility-adjusted), not fixed percentages ---
+STOCKS_STOP_LOSS_ATR_MULT = _get_float("STOCKS_STOP_LOSS_ATR_MULT", 1.5)
+STOCKS_TAKE_PROFIT_ATR_MULT = _get_float("STOCKS_TAKE_PROFIT_ATR_MULT", 3.0)
+STOCKS_TRAILING_STOP_ATR_MULT = _get_float("STOCKS_TRAILING_STOP_ATR_MULT", 2.0)
+# Trailing stop only arms once price has moved this many ATRs in favor
+# (avoids trailing a position that hasn't even proven itself yet).
+STOCKS_TRAILING_ARM_ATR_MULT = _get_float("STOCKS_TRAILING_ARM_ATR_MULT", 1.5)
+STOCKS_MAX_HOLDING_DAYS = _get_float("STOCKS_MAX_HOLDING_DAYS", 10.0)
+
+# --- Backtesting ---
+BACKTEST_LOOKBACK_DAYS = _get_int("BACKTEST_LOOKBACK_DAYS", 730)  # ~2y of daily bars
+BACKTEST_IN_SAMPLE_FRACTION = _get_float("BACKTEST_IN_SAMPLE_FRACTION", 0.7)  # first 70% = in-sample/tune, last 30% = out-of-sample/validate
+BACKTEST_MIN_TRADES_FOR_SIGNIFICANCE = _get_int("BACKTEST_MIN_TRADES_FOR_SIGNIFICANCE", 20)
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

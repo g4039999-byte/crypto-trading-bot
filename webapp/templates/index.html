@@ -237,6 +237,64 @@
     <div class="empty-msg" id="news-empty">لا توجد إشارات إخبارية نشطة حاليًا</div>
   </div>
 
+  <hr style="border:none; border-top:2px solid var(--border); margin:32px 0;">
+
+  <header style="margin:-20px -16px 20px; border-radius:0;">
+    <h1 style="font-size:22px;">📈 الأسهم الأمريكية (تجريبي)</h1>
+    <div class="muted">نظام منفصل تمامًا — Paper Trading فقط، بدون أموال حقيقية</div>
+  </header>
+
+  <div id="stocks-status-banner" class="status-banner stopped">جاري التحميل…</div>
+
+  <div class="controls">
+    <button id="btn-stocks-start" onclick="doStocksAction('/api/stocks/start')">🟢 تشغيل تداول الأسهم</button>
+    <button id="btn-stocks-stop" onclick="doStocksAction('/api/stocks/stop')">🔴 إيقاف تداول الأسهم</button>
+  </div>
+
+  <div id="stocks-toast" class="toast"></div>
+
+  <div class="card">
+    <h2>💰 رصيد الأسهم</h2>
+    <div class="stats-grid">
+      <div class="stat-box">
+        <div class="label">الرصيد التقديري</div>
+        <div class="value" id="stocks-stat-balance">—</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">ربح/خسارة اليوم</div>
+        <div class="value" id="stocks-stat-today-pnl">—</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">ربح/خسارة إجمالي</div>
+        <div class="value" id="stocks-stat-total-pnl">—</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">نسبة الصفقات الرابحة</div>
+        <div class="value" id="stocks-stat-winrate">—</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">التراجع من القمة (Drawdown)</div>
+        <div class="value" id="stocks-stat-drawdown">—</div>
+      </div>
+    </div>
+    <div class="muted" style="margin-top:10px;">
+      الاستراتيجية النشطة: <span id="stocks-active-strategy">—</span> ·
+      آخر دورة فحص: <span id="stocks-last-cycle">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>📂 صفقات الأسهم المفتوحة</h2>
+    <ul class="list" id="stocks-open-positions-list"></ul>
+    <div class="empty-msg" id="stocks-open-positions-empty">لا توجد صفقات مفتوحة حاليًا</div>
+  </div>
+
+  <div class="card">
+    <h2>🧾 آخر صفقات الأسهم</h2>
+    <ul class="list" id="stocks-recent-trades-list"></ul>
+    <div class="empty-msg" id="stocks-recent-trades-empty">لا توجد صفقات مغلقة بعد</div>
+  </div>
+
   <footer>يتم تحديث البيانات تلقائيًا كل 5 ثوانٍ</footer>
 </div>
 
@@ -394,8 +452,88 @@ async function refresh() {
   }
 }
 
+// --- الأسهم الأمريكية: نظام مستقل تمامًا بأزرار وحالة منفصلة ---
+
+function setStocksButtonsBusy(busy) {
+  ["btn-stocks-start", "btn-stocks-stop"].forEach(id => {
+    document.getElementById(id).disabled = busy;
+  });
+}
+
+async function doStocksAction(url) {
+  setStocksButtonsBusy(true);
+  try {
+    const res = await fetchWithTimeout(url, { method: "POST" }, ACTION_TIMEOUT_MS);
+    const data = await res.json();
+    const toast = document.getElementById("stocks-toast");
+    toast.textContent = data.message;
+    toast.style.display = "block";
+    clearTimeout(window._stocksToastTimer);
+    window._stocksToastTimer = setTimeout(() => { toast.style.display = "none"; }, 4000);
+    renderStocksStatus(data.status);
+  } catch (e) {
+    const toast = document.getElementById("stocks-toast");
+    toast.textContent = e.name === "AbortError"
+      ? `⏱️ انتهت مهلة الاتصال بالخادم (${ACTION_TIMEOUT_MS / 1000} ثوانٍ)`
+      : "⚠️ حدث خطأ في الاتصال بالخادم";
+    toast.style.display = "block";
+  } finally {
+    setStocksButtonsBusy(false);
+  }
+}
+
+function renderStocksStatus(s) {
+  const banner = document.getElementById("stocks-status-banner");
+  banner.textContent = s.process_running ? "🟢 تداول الأسهم يعمل الآن" : "🔴 تداول الأسهم متوقف";
+  banner.className = "status-banner " + (s.process_running ? "running" : "stopped");
+
+  document.getElementById("stocks-stat-balance").textContent = money(s.balance.estimated_balance_usd);
+
+  const todayEl = document.getElementById("stocks-stat-today-pnl");
+  todayEl.textContent = money(s.balance.today_pnl_usd);
+  todayEl.className = "value " + (s.balance.today_pnl_usd > 0 ? "pos" : s.balance.today_pnl_usd < 0 ? "neg" : "");
+
+  const totalEl = document.getElementById("stocks-stat-total-pnl");
+  totalEl.textContent = money(s.balance.total_pnl_usd);
+  totalEl.className = "value " + (s.balance.total_pnl_usd > 0 ? "pos" : s.balance.total_pnl_usd < 0 ? "neg" : "");
+
+  document.getElementById("stocks-stat-winrate").textContent = s.balance.win_rate_pct != null ? s.balance.win_rate_pct + "%" : "—";
+  document.getElementById("stocks-stat-drawdown").textContent = s.balance.drawdown_pct != null ? s.balance.drawdown_pct + "%" : "—";
+  document.getElementById("stocks-active-strategy").textContent = s.active_strategy || "لم يُعتمد بعد (يجرّب كل الاستراتيجيات)";
+  document.getElementById("stocks-last-cycle").textContent = s.last_cycle ? fmtTime(s.last_cycle.completed_at) : "لم تعمل أي دورة بعد";
+
+  renderList("stocks-open-positions-list", "stocks-open-positions-empty", s.open_positions, (p) => `
+    <div>
+      <div class="item-main">${p.symbol}</div>
+      <div class="item-sub">فُتحت: ${fmtTime(p.opened_at)} · استراتيجية ${p.strategy ?? "—"} · نقاط ${p.entry_score ?? "—"}</div>
+    </div>
+    <div class="pill">${money(p.size_usd)}</div>
+  `);
+
+  renderList("stocks-recent-trades-list", "stocks-recent-trades-empty", s.recent_trades, (t) => `
+    <div>
+      <div class="item-main">${t.symbol}</div>
+      <div class="item-sub">${t.reason ?? "—"} · ${fmtTime(t.closed_at)} · استراتيجية ${t.strategy ?? "—"}</div>
+    </div>
+    <div class="pill" style="color:${t.is_win ? '#1a9c53' : '#d13b3b'}; font-weight:bold;">${money(t.pnl_usd)}</div>
+  `);
+}
+
+async function refreshStocks() {
+  try {
+    const res = await fetchWithTimeout("/api/stocks/status", {}, STATUS_TIMEOUT_MS);
+    const data = await res.json();
+    renderStocksStatus(data);
+  } catch (e) {
+    document.getElementById("stocks-status-banner").textContent =
+      e.name === "AbortError" ? "⏱️ تعذّر الاتصال بالخادم (انتهت المهلة)" : "⚠️ تعذّر الاتصال بالخادم";
+  }
+}
+
 refresh();
 setInterval(refresh, 5000);
+refreshStocks();
+setInterval(refreshStocks, 5000);
 </script>
 
 </body>

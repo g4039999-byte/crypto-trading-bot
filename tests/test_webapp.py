@@ -214,6 +214,151 @@ class TestRoutes(unittest.TestCase):
         self.assertTrue(response.get_json()["ok"])
 
 
+class TestStocksIsIndependentOfCrypto(unittest.TestCase):
+    def test_start_stocks_never_touches_the_radar_process_or_pid_file(self):
+        source = inspect.getsource(webapp_module.start_stocks)
+        self.assertIn("src.stocks.run", source)
+        self.assertNotIn("src.radar", source)
+        self.assertNotIn('"--live"', source)  # quoted form: an actual CLI arg, not the explanatory docstring prose
+
+    def test_stocks_and_crypto_process_state_are_fully_separate(self):
+        self.assertIsNot(webapp_module._stocks_lock, webapp_module._lock)
+        self.assertNotEqual(webapp_module.STOCKS_PID_FILE, webapp_module.PID_FILE)
+
+
+class TestBuildStocksStatus(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(webapp_module, "is_stocks_running", return_value=False)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+    def test_empty_state_produces_a_valid_zeroed_payload(self):
+        with mock.patch("src.stocks.paper_broker.load_state", return_value={"open_positions": [], "closed_trades": [], "daily_pnl_usd": {}}), \
+                mock.patch("src.stocks.strategy_registry.get_active_strategy", return_value=None), \
+                mock.patch("src.stocks.strategy_registry.list_versions", return_value=[]):
+            status = webapp_module.build_stocks_status()
+
+        self.assertFalse(status["live_trading"])
+        self.assertEqual(status["open_positions"], [])
+        self.assertEqual(status["recent_trades"], [])
+        self.assertIsNone(status["active_strategy"])
+        self.assertEqual(status["balance"]["closed_trade_count"], 0)
+
+    def test_balance_reflects_realized_pnl_and_open_positions(self):
+        state = {
+            "open_positions": [{"symbol": "AAPL", "size_usd": 500.0, "entry_price": 100.0, "opened_at": "t", "strategy": "breakout", "entry_score": 70}],
+            "closed_trades": [{"symbol": "MSFT", "pnl_usd": 25.0, "pnl_pct": 5.0, "reason": "take_profit", "closed_at": "2026-01-01T00:00:00+00:00", "strategy": "breakout", "was_correct": True}],
+            "daily_pnl_usd": {webapp_module._today_key(): 25.0},
+        }
+        with mock.patch("src.stocks.paper_broker.load_state", return_value=state), \
+                mock.patch("src.stocks.strategy_registry.get_active_strategy", return_value="breakout"), \
+                mock.patch("src.stocks.strategy_registry.list_versions", return_value=[]):
+            status = webapp_module.build_stocks_status()
+
+        self.assertEqual(status["balance"]["total_pnl_usd"], 25.0)
+        self.assertEqual(status["balance"]["deployed_usd"], 500.0)
+        self.assertEqual(status["balance"]["win_rate_pct"], 100.0)
+        self.assertEqual(status["active_strategy"], "breakout")
+        self.assertEqual(len(status["open_positions"]), 1)
+        self.assertEqual(status["recent_trades"][0]["symbol"], "MSFT")
+
+    def test_never_raises_even_if_paper_broker_state_is_corrupt(self):
+        with mock.patch("src.stocks.paper_broker.load_state", side_effect=RuntimeError("corrupt state file")):
+            status = webapp_module.build_stocks_status()
+        self.assertFalse(status["live_trading"])
+        self.assertEqual(status["open_positions"], [])
+
+    def test_live_trading_is_always_reported_false(self):
+        with mock.patch("src.stocks.paper_broker.load_state", return_value={"open_positions": [], "closed_trades": [], "daily_pnl_usd": {}}), \
+                mock.patch("src.stocks.strategy_registry.get_active_strategy", return_value=None), \
+                mock.patch("src.stocks.strategy_registry.list_versions", return_value=[]):
+            status = webapp_module.build_stocks_status()
+        self.assertFalse(status["live_trading"])
+
+
+class TestStocksProcessControlIsReal(unittest.TestCase):
+    def setUp(self):
+        webapp_module._managed_stocks_process = None
+        self.addCleanup(setattr, webapp_module, "_managed_stocks_process", None)
+        patcher = mock.patch.object(webapp_module, "_clear_stocks_pid")
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        patcher2 = mock.patch.object(webapp_module, "_write_stocks_pid")
+        self.addCleanup(patcher2.stop)
+        patcher2.start()
+
+    def test_start_stocks_launches_the_stocks_loop_module(self):
+        fake_proc = mock.Mock(pid=5151)
+        fake_proc.poll.return_value = None
+
+        with mock.patch.object(webapp_module, "is_stocks_running", return_value=False), \
+                mock.patch("subprocess.Popen", return_value=fake_proc) as mock_popen:
+            ok, message = webapp_module.start_stocks()
+
+        self.assertTrue(ok)
+        args, kwargs = mock_popen.call_args
+        command = args[0]
+        self.assertIn("src.stocks.run", command)
+        self.assertIn("--loop", command)
+        self.assertNotIn("--live", command)
+        self.assertIs(webapp_module._managed_stocks_process, fake_proc)
+
+    def test_start_stocks_refuses_when_already_running(self):
+        with mock.patch.object(webapp_module, "is_stocks_running", return_value=True), \
+                mock.patch("subprocess.Popen") as mock_popen:
+            ok, message = webapp_module.start_stocks()
+
+        self.assertFalse(ok)
+        mock_popen.assert_not_called()
+
+    def test_stop_stocks_kills_the_tracked_process(self):
+        webapp_module._managed_stocks_process = mock.Mock(pid=888)
+        webapp_module._managed_stocks_process.wait.return_value = None
+
+        with mock.patch.object(webapp_module, "_pid_is_alive", return_value=True), \
+                mock.patch.object(webapp_module, "_kill_pid") as mock_kill:
+            ok, message = webapp_module.stop_stocks()
+
+        self.assertTrue(ok)
+        mock_kill.assert_called_once_with(888)
+        self.assertIsNone(webapp_module._managed_stocks_process)
+
+    def test_stop_stocks_when_nothing_running_is_a_no_op(self):
+        with mock.patch.object(webapp_module, "_pid_is_alive", return_value=False):
+            ok, message = webapp_module.stop_stocks()
+        self.assertFalse(ok)
+
+
+class TestStocksRoutes(unittest.TestCase):
+    def setUp(self):
+        webapp_module.app.testing = True
+        self.client = webapp_module.app.test_client()
+
+    def test_stocks_status_endpoint(self):
+        with mock.patch.object(webapp_module, "build_stocks_status", return_value={"ok": True}):
+            response = self.client.get("/api/stocks/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"ok": True})
+
+    def test_stocks_start_endpoint_calls_start_stocks_and_returns_fresh_status(self):
+        with mock.patch.object(webapp_module, "start_stocks", return_value=(True, "بدأ")) as mock_start, \
+                mock.patch.object(webapp_module, "build_stocks_status", return_value={"process_running": True}):
+            response = self.client.post("/api/stocks/start")
+
+        mock_start.assert_called_once()
+        body = response.get_json()
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["status"]["process_running"])
+
+    def test_stocks_stop_endpoint_calls_stop_stocks(self):
+        with mock.patch.object(webapp_module, "stop_stocks", return_value=(True, "توقف")) as mock_stop, \
+                mock.patch.object(webapp_module, "build_stocks_status", return_value={}):
+            response = self.client.post("/api/stocks/stop")
+
+        mock_stop.assert_called_once()
+        self.assertTrue(response.get_json()["ok"])
+
+
 class TestPortGuard(unittest.TestCase):
     """Covers the fix for the incident where two instances of the web
     panel ended up bound to the same port: one held the real listening

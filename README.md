@@ -81,8 +81,27 @@ crypto-trading-bot/
 │   ├── portfolio.py        # position sizing, stop-loss/take-profit, daily loss cap
 │   ├── trade_logger.py     # writes data/trade_log.jsonl
 │   ├── live_trader.py      # entry/exit decision logic -- logs decisions, places no order
-│   └── wallet.py           # wallet loading + connection test; real signing NOT implemented
-├── tests/                  # unit + integration tests (stdlib unittest)
+│   ├── wallet.py           # wallet loading + connection test; real signing NOT implemented
+│   │
+│   └── stocks/             # US-stocks paper-trading subsystem -- separate, see its own README section
+│       ├── config.py           # STOCKS_LIVE_TRADING hard-set False; everything else env-overridable
+│       ├── data_provider.py    # yfinance (default) / Alpaca -- swappable, auto-fallback
+│       ├── alpaca_client.py    # Alpaca paper-trading REST client (never the live endpoint)
+│       ├── features.py         # SMA/EMA/RSI/ATR/VWAP/relative volume
+│       ├── regime.py           # SPY-based market regime classification
+│       ├── discovery.py        # universe scan + first-pass filter
+│       ├── strategies/         # momentum, breakout, mean_reversion, vwap_reclaim (intraday)
+│       ├── scoring.py          # Opportunity Score (strategy + volume + volatility + trend + regime + X)
+│       ├── risk_engine.py      # ATR-based stop/take-profit/trailing stop, position sizing, circuit breaker
+│       ├── paper_broker.py     # local paper ledger -- data/stocks/paper_positions.json
+│       ├── paper_logger.py     # writes data/stocks/paper_trade_log.jsonl
+│       ├── engine.py           # orchestrates one full cycle; run_forever() for --loop
+│       ├── run.py              # CLI entry point: python -m src.stocks.run [--loop]
+│       ├── backtester.py       # walk-forward backtest engine (in-sample/out-of-sample)
+│       ├── benchmarks.py       # baseline strategies every candidate must beat
+│       ├── performance.py      # win rate/PF/expectancy/Sharpe/Sortino/max drawdown
+│       └── strategy_registry.py  # records backtests, tracks the one active strategy
+├── tests/                  # unit + integration tests (stdlib unittest), incl. tests/stocks/
 ├── requirements.txt        # runtime dependencies (radar only)
 ├── requirements-dev.txt    # + pytest, for development
 ├── requirements-live.txt   # + solders, only needed once wiring up real signing
@@ -383,6 +402,89 @@ changes these terms periodically):
 6. Restart `python -m webapp.app` (or the radar process directly) --
    `X_BEARER_TOKEN` is read once at process start, so an already-running
    process needs a restart to pick up a freshly-added token.
+
+## US Stocks (`src/stocks/`) -- separate paper-trading subsystem
+
+A second, fully independent trading system lives in `src/stocks/`: US
+equities instead of Solana meme tokens, its own config, its own state
+files (`data/stocks/`), its own web-UI section -- built deliberately as
+a parallel package rather than a shared rewrite, so nothing here can
+ever break the crypto side above, and vice versa. **Paper trading
+only** -- `STOCKS_LIVE_TRADING` is hard-set `False` at the source level
+in `src/stocks/config.py` (not an env var, not a CLI flag, not
+overridable from the web UI), and no code path in this project has ever
+sent a real order to a brokerage.
+
+**Pipeline** (`src/stocks/engine.py::run_cycle`): market regime
+(`regime.py`, SPY-based) → universe scan + first-pass filter
+(`discovery.py`) → per-symbol feature engineering (`features.py`: SMA/
+EMA/RSI/ATR/VWAP/relative volume) → every registered strategy evaluated
+(`strategies/`: `momentum`, `breakout`, `mean_reversion`, and
+`vwap_reclaim` for intraday) → combined into an Opportunity Score
+(`scoring.py`: strategy confidence + volume + volatility fit + trend +
+liquidity + regime alignment + an optional, capped X/social bonus) →
+risk-gated paper entry (`risk_engine.py`: ATR-based stop/take-profit/
+trailing stop, position sizing, max positions/exposure/daily-loss/
+drawdown circuit breaker) → local paper ledger (`paper_broker.py`,
+mirrored best-effort to a real Alpaca *paper* account if configured) →
+full per-trade logging (`paper_logger.py`: reason, score, indicators,
+regime, stop/target, MFE/MAE, exit reason, was the signal correct).
+
+**Data**: `data_provider.py` uses free, no-account [yfinance](https://github.com/ranaroussi/yfinance)
+by default, with [Alpaca](https://alpaca.markets)'s paper-trading REST
+API (`alpaca_client.py`) as an optional, swappable alternative --
+`STOCKS_DATA_PROVIDER=auto` in `.env` picks Alpaca automatically once
+`ALPACA_API_KEY`/`ALPACA_API_SECRET` are set, and falls back to
+yfinance mid-call if Alpaca is ever unconfigured or down. Neither
+source, nor X, is ever required for the loop to keep running.
+
+**Strategy selection is backtest-driven, not manual.** `backtester.py`
+walk-forward backtests each daily strategy (in-sample/out-of-sample
+split) against `benchmarks.py`'s baselines (buy & hold, a naive SMA50
+cross, a naive volume spike) with `performance.py` computing win rate,
+profit factor, expectancy, Sharpe/Sortino, and max drawdown on a
+**summed**, not compounded, return series (many independent, fixed-$-
+sized, parallel trades across symbols -- compounding them sequentially
+as if they were one growing account produces meaningless numbers; see
+the module docstring). `strategy_registry.py` records every backtest
+run (with its rationale) to `data/stocks/strategy_versions.json` and
+tracks which single strategy is currently *active* --
+`src/stocks/engine.py` only takes a BUY signal from the active
+strategy, not from whichever of the four fires first. See its CLI:
+
+```bash
+python -m src.stocks.strategy_registry list
+python -m src.stocks.strategy_registry record breakout --rationale "..."
+python -m src.stocks.strategy_registry activate breakout
+```
+
+**Running it**:
+
+```bash
+python -m src.stocks.run                    # one cycle
+python -m src.stocks.run --loop              # continuous (STOCKS_LOOP_INTERVAL_SECONDS)
+python -m scripts.backtest_stocks_strategies # baselines + every strategy, in/out-of-sample
+```
+
+...or from the web control panel's "📈 الأسهم الأمريكية" section
+(`python -m webapp.app`), which starts/stops the same `--loop` process
+and shows balance, open positions, recent trades, active strategy, and
+the last cycle's funnel counts -- entirely separate Start/Stop from the
+crypto radar's.
+
+**Testing**: `tests/stocks/` (unit tests for every module above,
+including resilience tests proving a data-provider outage, an
+unconfigured/down Alpaca, or X failing entirely can never crash a
+cycle -- same convention as `tests/test_radar_integration.py` on the
+crypto side) plus the stocks-specific classes in `tests/test_webapp.py`.
+
+**Not yet built** (documented honestly rather than left implicit):
+a real news-signal source for stocks (`scoring.py`'s `news_bonus`
+parameter exists and is wired through, but nothing populates it yet --
+`src/news_signal_engine.py`/`src/news_providers.py` from the crypto
+side are generic enough to adapt, just not done), sector/industry-
+relative-strength scoring, and real-time WebSocket streaming (the loop
+polls on an interval instead).
 
 ## Live trading (disabled by default -- read this before changing anything)
 
