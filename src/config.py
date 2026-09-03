@@ -75,7 +75,15 @@ SNAPSHOT_HISTORY_LIMIT = _get_int("SNAPSHOT_HISTORY_LIMIT", 60)
 RADAR_WATCHLIST_SIZE = _get_int("RADAR_WATCHLIST_SIZE", 100)
 
 # --- Continuous mode (`python -m src.radar --loop`) ---
-RADAR_LOOP_INTERVAL_SECONDS = _get_float("RADAR_LOOP_INTERVAL_SECONDS", 300)
+# 60s (was 300s): meme coins move fast, and a token needs 2 cycles of
+# snapshots before observation.py can report a real trend at all (see
+# src/observation.py) -- at 300s that meant 5-10 real minutes before a
+# brand-new token could ever qualify for a trend-gated entry, on top of
+# whatever time it takes to notice it in the first place. 60s keeps each
+# cycle's own request volume unchanged (same batches of MAX_ADDRESSES_
+# PER_REQUEST) while cutting that discovery-to-decision latency roughly
+# 5x; DexScreener's public feed comfortably tolerates this cadence.
+RADAR_LOOP_INTERVAL_SECONDS = _get_float("RADAR_LOOP_INTERVAL_SECONDS", 60)
 
 # Logging.
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -144,6 +152,14 @@ MAX_CAPITAL_DEPLOYMENT_PCT = _get_float("MAX_CAPITAL_DEPLOYMENT_PCT", 80.0)
 STOP_LOSS_PCT = _get_float("STOP_LOSS_PCT", 25.0)     # sell if price drops this % from entry
 TAKE_PROFIT_PCT = _get_float("TAKE_PROFIT_PCT", 50.0)  # sell if price rises this % from entry
 
+# Close a position after this long regardless of price, so every trade
+# reaches a decision instead of being held indefinitely (a meme coin that
+# has gone flat is a decision to move on, not a reason to keep watching
+# forever). Applies to both src/portfolio.py and src/paper_portfolio.py's
+# check_exit -- this only changes exit *logic*, not whether live trading
+# is allowed to run at all (LIVE_TRADING still gates that separately).
+MAX_HOLDING_MINUTES = _get_float("MAX_HOLDING_MINUTES", 240.0)
+
 # --- Execution safety ---
 # Maximum slippage tolerance passed to Jupiter, in basis points (100 = 1%).
 # If the quote cannot be filled within this bound the swap is not sent.
@@ -174,6 +190,41 @@ SELLABILITY_PROBE_SOL = _get_float("SELLABILITY_PROBE_SOL", 0.01)
 # signal of a high sell tax or a honeypot.
 MAX_ROUND_TRIP_LOSS_PCT = _get_float("MAX_ROUND_TRIP_LOSS_PCT", 20.0)
 
+# --- Paper-trading entry tuning -- deliberately separate from, and more
+#     permissive than, MIN_LIVE_* above. MIN_LIVE_SCORE=80 alone is close
+#     to the scoring formula's theoretical ceiling (base*0.60 + momentum*0.40
+#     tops out around 90) and was never once reached in practice: a full
+#     day of real radar data (119 tracked opportunities, 2026-09-03) topped
+#     out at 67. Combined with requiring trend in (STRONG, RISING) -- only
+#     ~4% of that same sample -- paper trading was mathematically almost
+#     guaranteed to never place a single trade, independent of any bug.
+#     These values open that up to a "reasonable, not perfect" opportunity
+#     (roughly the top 5% by score in that sample) while every safety
+#     screen below (liquidity/volume floor, rug-window age, honeypot/
+#     sellability check) still applies in full -- see src/paper_trader.py
+#     and src/risk.py. None of this touches MIN_LIVE_* or live_trader.py:
+#     live trading is unaffected and stays fully gated by LIVE_TRADING.
+PAPER_MIN_SCORE = _get_int("PAPER_MIN_SCORE", 45)
+PAPER_ENTRY_TRENDS = tuple(
+    t.strip() for t in os.getenv("PAPER_ENTRY_TRENDS", "STRONG,RISING,NEUTRAL").split(",") if t.strip()
+)
+
+# Liquidity/volume/age safety floors for paper trades -- reuses the
+# general radar filter's liquidity/volume bar (MIN_LIQUIDITY_USD /
+# MIN_VOLUME_24H_USD above: "worth looking at" at all) rather than the
+# extra-strict MIN_LIVE_* bar meant for real money, while keeping the
+# same rug-window/staleness age window and full honeypot/sellability
+# screening as live (src/risk.py, src/jupiter_client.py) untouched.
+PAPER_MIN_LIQUIDITY_USD = _get_float("PAPER_MIN_LIQUIDITY_USD", MIN_LIQUIDITY_USD)
+PAPER_MIN_VOLUME_24H_USD = _get_float("PAPER_MIN_VOLUME_24H_USD", MIN_VOLUME_24H_USD)
+PAPER_MIN_PAIR_AGE_MINUTES = _get_float("PAPER_MIN_PAIR_AGE_MINUTES", MIN_LIVE_PAIR_AGE_MINUTES)
+PAPER_MAX_PAIR_AGE_MINUTES = _get_float("PAPER_MAX_PAIR_AGE_MINUTES", MAX_LIVE_PAIR_AGE_MINUTES)
+
+# Paper trading may hold more than one position at once (real risk is
+# zero), unlike the live MAX_OPEN_POSITIONS=1 above which is deliberately
+# conservative with real capital.
+PAPER_MAX_OPEN_POSITIONS = _get_int("PAPER_MAX_OPEN_POSITIONS", 3)
+
 # --- Wallet & RPC -- SOLANA_PRIVATE_KEY must NEVER be committed, logged,
 # printed, or pasted into a chat. It is read from the environment only.
 # SOLANA_WALLET_PUBLIC_KEY is not secret (it's just an address) and is
@@ -182,9 +233,19 @@ SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.co
 SOLANA_WALLET_PUBLIC_KEY = os.getenv("SOLANA_WALLET_PUBLIC_KEY", "")
 SOLANA_PRIVATE_KEY = os.getenv("SOLANA_PRIVATE_KEY", "")
 
-# --- Jupiter aggregator (public endpoints, no key required) ---
-JUPITER_QUOTE_URL = os.getenv("JUPITER_QUOTE_URL", "https://quote-api.jup.ag/v6/quote")
-JUPITER_SWAP_URL = os.getenv("JUPITER_SWAP_URL", "https://quote-api.jup.ag/v6/swap")
+# --- Jupiter aggregator (public "lite" tier, no key required) ---
+# quote-api.jup.ag (V6) was deprecated on 2025-10-01; it no longer even
+# resolves in DNS (confirmed 2026-09-03). lite-api.jup.ag is Jupiter's
+# current free/no-API-key tier of the same Swap API (verified live: a
+# real quote request against it returns HTTP 200 with the same
+# outAmount-bearing response shape jupiter_client.py already expects).
+# Without this, round_trip_check()'s honeypot/sellability screening can
+# never succeed for anyone, live or paper -- every candidate that
+# otherwise passes score/trend/risk would still be skipped with "no buy
+# route available", not because it is unsafe, but because the quote
+# request itself could never reach a live endpoint.
+JUPITER_QUOTE_URL = os.getenv("JUPITER_QUOTE_URL", "https://lite-api.jup.ag/swap/v1/quote")
+JUPITER_SWAP_URL = os.getenv("JUPITER_SWAP_URL", "https://lite-api.jup.ag/swap/v1/swap")
 SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
 # Circle's official mainnet USDC mint -- used only to derive an implied
 # SOL/USD price via a live Jupiter quote (SOL -> USDC), for sizing a real

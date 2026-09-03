@@ -1,5 +1,5 @@
-"""Paper trading: the exact same entry/exit decision rules as
-src/live_trader.py, applied against simulated positions only.
+"""Paper trading: an active, faster-to-act sibling of src/live_trader.py's
+entry/exit rules, applied against simulated positions only.
 
 No wallet, no kill switch check, no real order -- there is nothing here
 that *could* move real funds even in principle (unlike live_trader.py,
@@ -11,12 +11,29 @@ with, a real one.
 
 This exists to rehearse the whole pipeline (radar -> risk screening ->
 sizing -> entry -> tracking -> stop-loss/take-profit exit) safely, as
-many times as needed, before live trading is ever considered.
+many times as needed, before live trading is ever considered -- which
+only works if it actually rehearses that pipeline by trading. It
+intentionally uses its own, more permissive PAPER_* thresholds (see
+src/config.py) rather than live_trader.py's MIN_LIVE_*/ACCEPTABLE_ENTRY_
+TRENDS: those are close to the scoring formula's ceiling by design (real
+money, maximum selectivity), and reusing them here left this module
+skipping every single candidate, every cycle, indefinitely. Honeypot/
+sellability screening (round_trip_check + risk.assess_token_safety) is
+never weakened -- see that function's docstring.
 """
 
 import logging
 
-from src.config import MAX_SLIPPAGE_BPS, MIN_LIVE_SCORE, SELLABILITY_PROBE_SOL
+from src.config import (
+    MAX_SLIPPAGE_BPS,
+    PAPER_ENTRY_TRENDS,
+    PAPER_MAX_PAIR_AGE_MINUTES,
+    PAPER_MIN_LIQUIDITY_USD,
+    PAPER_MIN_PAIR_AGE_MINUTES,
+    PAPER_MIN_SCORE,
+    PAPER_MIN_VOLUME_24H_USD,
+    SELLABILITY_PROBE_SOL,
+)
 from src.jupiter_client import round_trip_check
 from src.paper_logger import log_decision
 from src.paper_portfolio import (
@@ -31,19 +48,26 @@ from src.risk import assess_token_safety
 
 logger = logging.getLogger(__name__)
 
-ACCEPTABLE_ENTRY_TRENDS = ("STRONG", "RISING")
-
 
 def evaluate_entry(evaluated_pair, probe_check=None):
-    """Same rules as live_trader.evaluate_entry(), minus the kill-switch
-    gate (there is nothing to gate -- this can never place a real
-    order). Returns {"action": "BUY" | "SKIP", "reason": str,
+    """Paper-mode entry screening: same shape as live_trader.evaluate_
+    entry() (score -> trend -> honeypot/liquidity/age risk -> sizing),
+    minus the kill-switch gate (there is nothing to gate -- this can
+    never place a real order), and using PAPER_* thresholds throughout.
+    Returns {"action": "BUY" | "SKIP", "reason": str,
     "size_usd": float | None}.
     """
     symbol = evaluated_pair.get("symbol", "?")
     address = evaluated_pair.get("address", "?")
 
     state = load_state()
+
+    already_held = any(p.get("token_address") == address for p in state.get("open_positions", []))
+    if already_held:
+        reason = "already holding an open paper position in this token"
+        log_decision("SKIP", symbol, address, reason)
+        return {"action": "SKIP", "reason": reason, "size_usd": None}
+
     room_ok, room_reason = can_open_new_position(state)
     if not room_ok:
         log_decision("SKIP", symbol, address, room_reason)
@@ -56,14 +80,14 @@ def evaluate_entry(evaluated_pair, probe_check=None):
         return {"action": "SKIP", "reason": reason, "size_usd": None}
 
     score = evaluated_pair.get("score", 0)
-    if score < MIN_LIVE_SCORE:
-        reason = f"score {score} below live minimum {MIN_LIVE_SCORE}"
+    if score < PAPER_MIN_SCORE:
+        reason = f"score {score} below paper minimum {PAPER_MIN_SCORE}"
         log_decision("SKIP", symbol, address, reason, extra={"score": score})
         return {"action": "SKIP", "reason": reason, "size_usd": None}
 
     trend = evaluated_pair.get("trend")
-    if trend not in ACCEPTABLE_ENTRY_TRENDS:
-        reason = f"trend '{trend}' not in {ACCEPTABLE_ENTRY_TRENDS}"
+    if trend not in PAPER_ENTRY_TRENDS:
+        reason = f"trend '{trend}' not in {PAPER_ENTRY_TRENDS}"
         log_decision("SKIP", symbol, address, reason, extra={"trend": trend})
         return {"action": "SKIP", "reason": reason, "size_usd": None}
 
@@ -71,7 +95,14 @@ def evaluate_entry(evaluated_pair, probe_check=None):
         probe_lamports = int(SELLABILITY_PROBE_SOL * 1_000_000_000)
         probe_check = round_trip_check(address, probe_lamports, MAX_SLIPPAGE_BPS)
 
-    risk = assess_token_safety(evaluated_pair, probe_check)
+    risk = assess_token_safety(
+        evaluated_pair,
+        probe_check,
+        min_liquidity_usd=PAPER_MIN_LIQUIDITY_USD,
+        min_volume_24h_usd=PAPER_MIN_VOLUME_24H_USD,
+        min_pair_age_minutes=PAPER_MIN_PAIR_AGE_MINUTES,
+        max_pair_age_minutes=PAPER_MAX_PAIR_AGE_MINUTES,
+    )
     if not risk.passed:
         reason = "; ".join(risk.reasons)
         log_decision("SKIP", symbol, address, reason, extra={"risk_reasons": risk.reasons})
@@ -100,11 +131,21 @@ def evaluate_exit(position, current_price_usd):
 
 
 def run_paper_cycle(evaluated_pairs):
-    """One pass over the radar's results: check the open paper position
+    """One pass over the radar's results: check every open paper position
     for an exit (using each pair's current price_usd when available),
-    then look for one new paper entry among evaluated_pairs (already
-    sorted by score). This is the function radar.py's `--paper` flag
-    wires in as run_once()'s on_results callback.
+    then look for new paper entries among evaluated_pairs (already sorted
+    by score, best first). This is the function radar.py's `--paper`
+    flag wires in as run_once()'s on_results callback.
+
+    Unlike a single-position system, this opens as many qualifying
+    entries as PAPER_MAX_OPEN_POSITIONS/capital room allow in the same
+    cycle (each still fully screened by evaluate_entry -- room and
+    capital caps enforced per-pair via can_open_new_position/
+    compute_position_size_usd re-reading state after each open), rather
+    than stopping after the first. A token just sold this same cycle is
+    never immediately re-bought in that same cycle, regardless of its
+    trend/score -- it gets a full cycle to be re-evaluated fresh next
+    time, avoiding same-cycle flip-flopping.
 
     Returns the list of decisions made this cycle.
     """
@@ -112,6 +153,7 @@ def run_paper_cycle(evaluated_pairs):
     current_prices = {p["address"]: p["price_usd"] for p in evaluated_pairs if p.get("price_usd")}
 
     state = load_state()
+    closed_this_cycle = set()
     for position in list(state.get("open_positions", [])):
         price = current_prices.get(position["token_address"])
         if price is None:
@@ -121,12 +163,14 @@ def run_paper_cycle(evaluated_pairs):
         decisions.append(exit_decision)
         if exit_decision["action"] == "SELL":
             close_position(position["token_address"], price, exit_decision["reason"])
+            closed_this_cycle.add(position["token_address"])
 
     for pair in evaluated_pairs:
+        if pair.get("address") in closed_this_cycle:
+            continue
         entry_decision = evaluate_entry(pair)
         decisions.append(entry_decision)
         if entry_decision["action"] == "BUY":
             open_position(pair["address"], pair["symbol"], pair["price_usd"], entry_decision["size_usd"])
-            break  # one new paper position per cycle, matching MAX_OPEN_POSITIONS=1 by default
 
     return decisions

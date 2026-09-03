@@ -137,7 +137,7 @@ is what lets `observation.py` compute a trend on the *next* run.
 ### Continuous mode
 
 ```bash
-python -m src.radar --loop                       # run forever, every RADAR_LOOP_INTERVAL_SECONDS (default 300s)
+python -m src.radar --loop                       # run forever, every RADAR_LOOP_INTERVAL_SECONDS (default 60s)
 python -m src.radar --loop --interval 60          # override the interval for this run
 python -m src.radar --loop --max-iterations 5     # stop after 5 cycles (mainly for a bounded test/demo)
 ```
@@ -210,27 +210,39 @@ touching the network or a real wallet.
 
 ## Paper trading (simulated -- no wallet, no real funds, ever)
 
-`src/paper_trader.py` runs the *exact same* entry/exit rules the live
-layer below uses (`MIN_LIVE_SCORE`, trend must be `STRONG`/`RISING`,
-liquidity/volume/age screening, the Jupiter sellability check, stop-loss
-`-25%`/take-profit `+50%`, one position at a time, the daily-loss cap)
-against a fully simulated position. It is structurally incapable of
-placing a real order: it never imports `src/wallet.py` or
-`src/kill_switch.py` at all (enforced by a regression test), and its
-state lives in `data/paper_positions.json` / `data/paper_trade_log.jsonl`
--- files the live layer never reads or writes.
+`src/paper_trader.py` runs the same *shape* of entry/exit pipeline the
+live layer below uses (score -> trend -> liquidity/volume/age screening
+-> the Jupiter sellability check -> sizing -> stop-loss/take-profit),
+against fully simulated positions -- but with its own, deliberately more
+permissive `PAPER_*` thresholds (`PAPER_MIN_SCORE=45` vs. live's
+`MIN_LIVE_SCORE=80`; trend accepts `NEUTRAL` too, not just
+`STRONG`/`RISING`; up to `PAPER_MAX_OPEN_POSITIONS=3` at once, not one).
+`MIN_LIVE_SCORE` alone is close to the scoring formula's ceiling and was
+found to reject essentially every real-world candidate, every cycle,
+indefinitely -- see `src/config.py`'s comments above `PAPER_MIN_SCORE`
+for the full reasoning and the real sample it's based on. The honeypot/
+sellability check and the liquidity/volume/age *floors themselves* are
+never weakened -- only which side of "reasonable vs. perfect" paper
+trading is allowed to act on. It is structurally incapable of placing a
+real order: it never imports `src/wallet.py` or `src/kill_switch.py` at
+all (enforced by a regression test), and its state lives in
+`data/paper_positions.json` / `data/paper_trade_log.jsonl` -- files the
+live layer never reads or writes.
 
 ```bash
 python -m src.radar --paper                 # one cycle, paper decisions only
 python -m src.radar --loop --paper           # continuous: radar + paper trading together
 ```
 
-Each cycle: any open paper position is checked against the current price
-for a stop-loss/take-profit exit first; then the highest-scoring
-qualifying candidate (if any, and if there's room under the position/
-daily-loss caps) is "bought" with simulated funds sized the same way live
-sizing would be (`MAX_TRADE_USD`, capped by `MAX_CAPITAL_DEPLOYMENT_PCT`
-of `TOTAL_CAPITAL_USD`). Every decision -- BUY, SKIP (with the exact
+Each cycle: every open paper position is checked against the current
+price for a stop-loss/take-profit/max-holding-time exit first; then each
+qualifying candidate (highest score first, up to `PAPER_MAX_OPEN_
+POSITIONS` and room under the daily-loss/capital-deployment caps) is
+"bought" with simulated funds sized the same way live sizing would be
+(`MAX_TRADE_USD`, capped by `MAX_CAPITAL_DEPLOYMENT_PCT` of
+`TOTAL_CAPITAL_USD`) -- so one cycle can open several positions at once,
+not just one, and a token already held is never bought again while its
+position is still open. Every decision -- BUY, SKIP (with the exact
 reason), SELL -- is appended to `data/paper_trade_log.jsonl`, tagged
 `"mode": "PAPER"`.
 
@@ -291,6 +303,12 @@ flipping that constant.
    the live-trading safety layer), but the "connection test", any real
    quote, and a real signed transaction have to be run from a machine
    with normal internet access -- yours, not this one.
+   (Update, 2026-09-03, run from an actual machine: `quote-api.jup.ag`
+   itself turned out to have been deprecated by Jupiter on 2025-10-01 and
+   no longer resolves in DNS anywhere, sandbox or not -- `src/config.py`'s
+   `JUPITER_QUOTE_URL`/`JUPITER_SWAP_URL` now point at `lite-api.jup.ag`,
+   Jupiter's current free tier, confirmed reachable and returning real
+   quotes. Solana RPC/`solders` still untested here.)
 2. **No private key has been provided, and none should be pasted here.**
    A seed phrase or private key typed into any chat -- this one included
    -- should be treated as compromised the moment it's typed. Real

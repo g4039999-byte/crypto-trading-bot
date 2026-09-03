@@ -44,7 +44,7 @@ if str(PROJECT_ROOT) not in sys.path:
     # the root on sys.path automatically).
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import KILL_SWITCH_FILE, MAX_OPEN_POSITIONS, TOTAL_CAPITAL_USD  # noqa: E402
+from src.config import KILL_SWITCH_FILE, PAPER_MAX_OPEN_POSITIONS, TOTAL_CAPITAL_USD  # noqa: E402
 from src.kill_switch import engage_kill_switch, release_kill_switch  # noqa: E402
 from src.logging_config import setup_logging  # noqa: E402
 from src.news_signal_engine import active_signals  # noqa: E402
@@ -391,7 +391,7 @@ def build_status():
             "top_opportunities": top_opportunities,
         },
         "news": news_items,
-        "max_open_positions": MAX_OPEN_POSITIONS,
+        "max_open_positions": PAPER_MAX_OPEN_POSITIONS,
         "server_time": datetime.now(timezone.utc).isoformat(),
     }
 

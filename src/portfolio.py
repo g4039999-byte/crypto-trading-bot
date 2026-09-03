@@ -16,6 +16,7 @@ from pathlib import Path
 from src.config import (
     MAX_CAPITAL_DEPLOYMENT_PCT,
     MAX_DAILY_LOSS_PCT,
+    MAX_HOLDING_MINUTES,
     MAX_OPEN_POSITIONS,
     MAX_TRADE_USD,
     STOP_LOSS_PCT,
@@ -135,6 +136,17 @@ def check_exit(position, current_price_usd):
         return True, "stop_loss"
     if current_price_usd >= position["take_profit_price_usd"]:
         return True, "take_profit"
+
+    opened_at = position.get("opened_at")
+    if opened_at:
+        try:
+            opened_dt = datetime.fromisoformat(opened_at)
+            held_minutes = (datetime.now(timezone.utc) - opened_dt).total_seconds() / 60
+            if held_minutes >= MAX_HOLDING_MINUTES:
+                return True, "max_holding_time"
+        except (ValueError, TypeError):
+            pass
+
     return False, None
 
 

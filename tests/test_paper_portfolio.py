@@ -19,7 +19,7 @@ class TestPaperPortfolio(unittest.TestCase):
             mock.patch.object(paper_portfolio, "STATE_FILE", tmp_file),
             mock.patch.object(paper_portfolio, "TOTAL_CAPITAL_USD", 24.0),
             mock.patch.object(paper_portfolio, "MAX_TRADE_USD", 5.0),
-            mock.patch.object(paper_portfolio, "MAX_OPEN_POSITIONS", 1),
+            mock.patch.object(paper_portfolio, "PAPER_MAX_OPEN_POSITIONS", 1),
             mock.patch.object(paper_portfolio, "MAX_DAILY_LOSS_PCT", 20.0),
             mock.patch.object(paper_portfolio, "MAX_CAPITAL_DEPLOYMENT_PCT", 80.0),
             mock.patch.object(paper_portfolio, "STOP_LOSS_PCT", 25.0),

@@ -114,6 +114,33 @@ class TestFullBuyThenSellCycle(unittest.TestCase):
         state = paper_portfolio.load_state()
         self.assertEqual(state["open_positions"], [])
 
+    def test_still_qualifying_pair_is_not_bought_twice_while_already_held(self):
+        # Cycle 1: opens a position. Cycle 2: the exact same pair still
+        # qualifies on every score/trend/risk check (nothing about it
+        # changed) -- it must be skipped as "already held", not bought a
+        # second time into a duplicate position on the same token.
+        pair = make_pair(price_usd=1.00)
+        paper_trader.run_paper_cycle([pair])
+        decisions = paper_trader.run_paper_cycle([pair])
+
+        self.assertEqual(decisions[-1]["action"], "SKIP")
+        self.assertIn("already holding", decisions[-1]["reason"])
+        state = paper_portfolio.load_state()
+        self.assertEqual(len(state["open_positions"]), 1)
+
+    def test_multiple_different_qualifying_pairs_open_multiple_positions_in_one_cycle(self):
+        pairs = [
+            make_pair(address="addr-1", symbol="ONE", price_usd=1.00),
+            make_pair(address="addr-2", symbol="TWO", price_usd=2.00),
+        ]
+        decisions = paper_trader.run_paper_cycle(pairs)
+
+        buys = [d for d in decisions if d["action"] == "BUY"]
+        self.assertEqual(len(buys), 2)
+        state = paper_portfolio.load_state()
+        self.assertEqual(len(state["open_positions"]), 2)
+        self.assertEqual({p["symbol"] for p in state["open_positions"]}, {"ONE", "TWO"})
+
     def test_unsellable_token_is_never_bought(self):
         honeypot_check = {"sellable": False, "reason": "no sell route -- possible honeypot", "round_trip_loss_pct": None}
         with mock.patch("src.paper_trader.round_trip_check", return_value=honeypot_check):

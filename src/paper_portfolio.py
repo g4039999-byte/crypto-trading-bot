@@ -17,8 +17,9 @@ from pathlib import Path
 from src.config import (
     MAX_CAPITAL_DEPLOYMENT_PCT,
     MAX_DAILY_LOSS_PCT,
-    MAX_OPEN_POSITIONS,
+    MAX_HOLDING_MINUTES,
     MAX_TRADE_USD,
+    PAPER_MAX_OPEN_POSITIONS,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
     TOTAL_CAPITAL_USD,
@@ -85,8 +86,8 @@ def deployed_capital_usd(state=None):
 def can_open_new_position(state=None):
     state = state or load_state()
 
-    if len(state.get("open_positions", [])) >= MAX_OPEN_POSITIONS:
-        return False, f"already at the max of {MAX_OPEN_POSITIONS} open position(s)"
+    if len(state.get("open_positions", [])) >= PAPER_MAX_OPEN_POSITIONS:
+        return False, f"already at the max of {PAPER_MAX_OPEN_POSITIONS} open paper position(s)"
 
     if daily_loss_cap_hit(state):
         return False, (
@@ -133,6 +134,21 @@ def check_exit(position, current_price_usd):
         return True, "stop_loss"
     if current_price_usd >= position["take_profit_price_usd"]:
         return True, "take_profit"
+
+    # A position that has neither hit stop-loss nor take-profit for too
+    # long is a decision being avoided, not a good trade in progress --
+    # force it so capital and attention move on to the next opportunity
+    # instead of holding a flat/stale token indefinitely.
+    opened_at = position.get("opened_at")
+    if opened_at:
+        try:
+            opened_dt = datetime.fromisoformat(opened_at)
+            held_minutes = (datetime.now(timezone.utc) - opened_dt).total_seconds() / 60
+            if held_minutes >= MAX_HOLDING_MINUTES:
+                return True, "max_holding_time"
+        except (ValueError, TypeError):
+            pass
+
     return False, None
 
 
