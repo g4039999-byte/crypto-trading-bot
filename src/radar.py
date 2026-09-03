@@ -202,13 +202,24 @@ def run_once(on_results=None):
     results = run_radar()
     passed = sum(1 for item in results if item["ok"])
 
-    print()
-    print("=== FINAL RANKED RESULTS ===")
-    for item in results:
-        print(_format_line(item))
+    # Printing the ranked table is display-only -- it must never be able
+    # to block the paper-trading decision below. setup_logging() already
+    # forces UTF-8 stdout so this shouldn't raise in practice, but this
+    # is the one place in the loop where a bug here previously took the
+    # whole cycle down (see _force_utf8_console()'s docstring), so it
+    # stays defended even if some future, unrelated formatting bug shows
+    # up here again.
+    try:
+        print()
+        print("=== FINAL RANKED RESULTS ===")
+        for item in results:
+            print(_format_line(item))
 
-    print()
-    print(f"Pairs evaluated: {len(results)} | Pairs passing first filter: {passed}")
+        print()
+        print(f"Pairs evaluated: {len(results)} | Pairs passing first filter: {passed}")
+    except Exception:
+        logger.exception("Failed to print the ranked results table -- continuing the cycle regardless")
+
     logger.info("Radar run complete: %s evaluated, %s passed the first filter", len(results), passed)
 
     if on_results is not None:
