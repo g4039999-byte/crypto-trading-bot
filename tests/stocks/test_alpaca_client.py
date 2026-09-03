@@ -95,6 +95,22 @@ class TestRequestResilience(unittest.TestCase):
             result = alpaca_client.list_positions()
         self.assertEqual(result, [])
 
+    def test_timeout_is_retried_then_can_still_succeed(self):
+        import requests as requests_module
+
+        with mock.patch("requests.request", side_effect=[requests_module.exceptions.Timeout("slow"), _resp(200, {"ok": True})]) as mock_request, \
+             mock.patch("time.sleep"):
+            result = alpaca_client.get_account()
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(mock_request.call_count, 2)
+
+    def test_timeout_on_every_attempt_returns_none_not_a_raise(self):
+        import requests as requests_module
+
+        with mock.patch("requests.request", side_effect=requests_module.exceptions.Timeout("slow")), mock.patch("time.sleep"):
+            result = alpaca_client.get_account()
+        self.assertIsNone(result)
+
     def test_submit_paper_order_hits_the_paper_base_url_only(self):
         with mock.patch("requests.request", return_value=_resp(200, {"id": "abc"})) as mock_request:
             alpaca_client.submit_paper_order("AAPL", 1, "buy")

@@ -21,6 +21,8 @@ counts as wrong).
 
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,12 +55,31 @@ def _today_key():
 
 
 def load_state():
+    """Restart-safe by construction: this is the ONLY place open
+    positions/closed trades/trade-count-today live, so whatever this
+    returns is exactly what src.stocks.engine sees as "already
+    happened" on a fresh process start -- there is no separate
+    in-memory state to reconcile, so a duplicate buy of an
+    already-open symbol is impossible as long as this file reflects
+    reality, which save_state()'s atomic write below exists to
+    guarantee even across a crash mid-write.
+    """
     if not STATE_FILE.exists():
         return _empty_state()
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
+        # A genuinely corrupt file (not just "missing") is data loss --
+        # preserve it for forensics instead of silently discarding it,
+        # and log loudly, but still return a safe empty state so the
+        # loop can keep running rather than crash-looping forever.
         logger.error("Could not read %s -- treating as empty: %s", STATE_FILE, exc)
+        try:
+            corrupt_copy = STATE_FILE.with_suffix(".corrupt." + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + ".json")
+            STATE_FILE.replace(corrupt_copy)
+            logger.error("Preserved the corrupt file at %s for inspection", corrupt_copy)
+        except OSError:
+            pass
         return _empty_state()
     for key, default in _empty_state().items():
         data.setdefault(key, default)
@@ -66,8 +87,26 @@ def load_state():
 
 
 def save_state(state):
+    """Atomic write (temp file in the same directory + os.replace) so a
+    crash or power loss mid-write can never leave paper_positions.json
+    torn/half-written -- the file is always either the previous valid
+    state or the new one, never something in between. This is what
+    makes load_state()'s restart-safety guarantee actually hold.
+    """
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    fd, tmp_path = tempfile.mkstemp(dir=str(STATE_FILE.parent), prefix=".paper_positions_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, STATE_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def reset_paper_state():

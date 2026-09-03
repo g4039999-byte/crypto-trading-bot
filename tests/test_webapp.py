@@ -275,6 +275,31 @@ class TestBuildStocksStatus(unittest.TestCase):
             status = webapp_module.build_stocks_status()
         self.assertFalse(status["live_trading"])
 
+    def test_includes_system_health_and_learning_status(self):
+        health_state = {
+            "status": "RUNNING", "last_success_at": "t", "consecutive_failures": 0,
+            "recovery_attempts_total": 2, "outage_started_at": None,
+            "outage_reason": None, "last_recovery_at": "t2",
+        }
+        learning_state = {"last_run_at": "t3", "last_action": "no_change", "last_action_reason": "breakout still best", "history": [{"at": "t3", "action": "no_change", "reason": "x"}]}
+        with mock.patch("src.stocks.paper_broker.load_state", return_value={"open_positions": [], "closed_trades": [], "daily_pnl_usd": {}}), \
+                mock.patch("src.stocks.strategy_registry.get_active_strategy", return_value="breakout"), \
+                mock.patch("src.stocks.strategy_registry.list_versions", return_value=[]), \
+                mock.patch("src.stocks.health.load_health", return_value=health_state), \
+                mock.patch("src.stocks.learning_engine.get_learning_state", return_value=learning_state):
+            status = webapp_module.build_stocks_status()
+
+        self.assertEqual(status["system_health"]["status"], "RUNNING")
+        self.assertEqual(status["system_health"]["recovery_attempts_total"], 2)
+        self.assertEqual(status["learning"]["last_action"], "no_change")
+        self.assertEqual(len(status["learning"]["recent_history"]), 1)
+
+    def test_health_or_learning_lookup_failure_still_returns_a_safe_payload(self):
+        with mock.patch("src.stocks.health.load_health", side_effect=RuntimeError("disk error")):
+            status = webapp_module.build_stocks_status()
+        self.assertFalse(status["live_trading"])
+        self.assertEqual(status["system_health"]["status"], "UNKNOWN")
+
 
 class TestStocksProcessControlIsReal(unittest.TestCase):
     def setUp(self):

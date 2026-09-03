@@ -17,12 +17,14 @@ src.stocks.backtester) say which one(s) actually work, rather than the
 code hard-committing to a single "the" strategy.
 """
 
-from src.stocks.strategies import breakout, mean_reversion, momentum, vwap_reclaim
+from src.stocks.strategies import breakout, mean_reversion, momentum, pullback, relative_volume, vwap_reclaim
 
 STRATEGIES = {
     momentum.NAME: momentum,
     breakout.NAME: breakout,
     mean_reversion.NAME: mean_reversion,
+    pullback.NAME: pullback,
+    relative_volume.NAME: relative_volume,
     vwap_reclaim.NAME: vwap_reclaim,
 }
 

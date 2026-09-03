@@ -18,9 +18,11 @@ resilience tests.
 import logging
 import time
 
-from src.stocks.config import STOCKS_LOOP_INTERVAL_SECONDS, STOCKS_MIN_SCORE
+from src.stocks import health
+from src.stocks.config import STOCKS_LOOP_INTERVAL_SECONDS, STOCKS_MARKET_CLOSED_POLL_SECONDS, STOCKS_MIN_SCORE, STOCKS_RESPECT_MARKET_HOURS
 from src.stocks.data_provider import get_provider
 from src.stocks.discovery import scan_universe
+from src.stocks.market_hours import is_market_open, seconds_until_next_open
 from src.stocks.paper_broker import evaluate_exit_for_open_positions, load_state, open_position
 from src.stocks.paper_logger import log_decision
 from src.stocks.regime import current_regime, risk_multiplier
@@ -201,22 +203,81 @@ def _write_last_cycle_status(summary):
         logger.exception("Could not persist last-cycle status -- non-fatal")
 
 
+def _maybe_wait_for_market_open():
+    """If STOCKS_RESPECT_MARKET_HOURS is on and the market is closed
+    right now, sleep in short, interruptible polls (never one giant
+    sleep) until either it opens or STOCKS_MARKET_CLOSED_POLL_SECONDS
+    worth of waiting has happened -- returns without blocking further
+    either way, so the caller's own loop stays responsive (KeyboardInterrupt,
+    a future stop signal) instead of one multi-hour time.sleep() call.
+    Returns True if the market is open (or gating is disabled) and a
+    real cycle should run this iteration, False if it should skip.
+    """
+    if not STOCKS_RESPECT_MARKET_HOURS:
+        return True
+    if is_market_open():
+        return True
+    wait = min(seconds_until_next_open(), STOCKS_MARKET_CLOSED_POLL_SECONDS)
+    logger.info("US market closed -- sleeping %.0fs before checking again", wait)
+    time.sleep(max(1.0, wait))
+    return False
+
+
+def _maybe_run_learning_cycle():
+    """Best-effort periodic strategy re-evaluation -- see
+    src.stocks.learning_engine's module docstring for the full pipeline
+    (analyze -> backtest candidates -> walk-forward compare -> adopt
+    only a real, significant improvement -> or roll back a degrading
+    active strategy). Never lets a learning-cycle failure take down the
+    trading loop itself.
+    """
+    try:
+        from src.stocks.learning_engine import maybe_run_learning_cycle
+        maybe_run_learning_cycle()
+    except Exception:
+        logger.exception("Learning cycle failed this iteration -- trading loop continues unaffected")
+
+
 def run_forever(interval_seconds=None, max_iterations=None):
+    """Continuous loop with three layers of resilience on top of a
+    plain run_cycle():
+    1. Market-hours gating (_maybe_wait_for_market_open) -- skip real
+       cycles while the exchange is closed instead of polling data
+       providers for nothing.
+    2. Health-tracked exponential backoff (src.stocks.health) -- a
+       cycle that raises (rate limit, timeout, connection error, any
+       transient data-provider failure) is retried automatically with
+       a growing, capped delay, never treated as a reason to stop; the
+       failure streak, outage start time, and recovery are all recorded
+       for the dashboard's System/Data-Source Health.
+    3. A periodic, best-effort self-learning check (_maybe_run_learning_cycle).
+
+    A single unhandled KeyboardInterrupt (Ctrl+C) is still the only
+    thing that stops this loop early -- everything else is retried.
+    """
     interval_seconds = STOCKS_LOOP_INTERVAL_SECONDS if interval_seconds is None else interval_seconds
     logger.info("Starting continuous stocks paper-trading loop (interval=%ss)", interval_seconds)
 
     iteration = 0
     try:
         while max_iterations is None or iteration < max_iterations:
+            if not _maybe_wait_for_market_open():
+                continue  # market still closed -- don't count this as a cycle or run one
+
             iteration += 1
             logger.info("--- Stocks cycle %s ---", iteration)
             try:
-                run_cycle()
-            except Exception:
-                logger.exception("Stocks cycle %s failed -- will retry next cycle", iteration)
+                summary = run_cycle()
+                health.record_success(summary={k: v for k, v in summary.items() if k != "regime"})
+                sleep_for = interval_seconds
+            except Exception as exc:
+                logger.exception("Stocks cycle %s failed -- auto-recovering", iteration)
+                sleep_for = health.record_failure(repr(exc))
+
+            _maybe_run_learning_cycle()
 
             if max_iterations is not None and iteration >= max_iterations:
                 break
-            time.sleep(interval_seconds)
+            time.sleep(sleep_for)
     except KeyboardInterrupt:
         logger.info("Stocks loop stopped by user (Ctrl+C) after %s cycle(s)", iteration)

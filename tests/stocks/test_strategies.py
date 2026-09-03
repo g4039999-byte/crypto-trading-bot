@@ -1,7 +1,7 @@
 import unittest
 
 from src.stocks.features import compute_features
-from src.stocks.strategies import breakout, evaluate_all, mean_reversion, momentum, vwap_reclaim
+from src.stocks.strategies import breakout, evaluate_all, mean_reversion, momentum, pullback, relative_volume, vwap_reclaim
 from tests.stocks.helpers import breakout_bars, downtrend_bars, flat_bars, make_bars, uptrend_bars
 
 
@@ -103,12 +103,76 @@ class TestVwapReclaim(unittest.TestCase):
         self.assertEqual(signal["action"], "SKIP")
 
 
+class TestPullback(unittest.TestCase):
+    def test_buys_a_shallow_dip_to_a_rising_ema20(self):
+        # Found via a parameter scan (see the module's own PR discussion):
+        # a gentle 40-day rally followed by a real-but-shallow 3-day dip
+        # lands price just under a still-rising 20d EMA, RSI mid-range --
+        # a clean pullback, not a breakdown and not overbought.
+        closes = [100.0] * 30
+        for _ in range(40):
+            closes.append(closes[-1] * 1.005)
+        for _ in range(3):
+            closes.append(closes[-1] * 0.985)
+        df = make_bars(closes)
+        features = compute_features(df)
+        signal = pullback.generate_signal(features, df)
+        self.assertEqual(signal["action"], "BUY")
+
+    def test_skips_a_flat_market_with_no_rising_average(self):
+        df = flat_bars(n=80)
+        features = compute_features(df)
+        signal = pullback.generate_signal(features, df)
+        self.assertEqual(signal["action"], "SKIP")
+
+    def test_skips_below_the_50d_average(self):
+        df = downtrend_bars(n=80, daily_loss_pct=0.5)
+        features = compute_features(df)
+        signal = pullback.generate_signal(features, df)
+        self.assertEqual(signal["action"], "SKIP")
+        self.assertIn("downtrend", signal["reason"])
+
+    def test_never_raises_on_missing_features(self):
+        signal = pullback.generate_signal({}, None)
+        self.assertEqual(signal["action"], "SKIP")
+
+
+class TestRelativeVolume(unittest.TestCase):
+    def test_buys_a_strong_volume_day_closing_near_its_high(self):
+        closes = [100.0] * 40 + [108.0]  # a sharp up day
+        volumes = [1_000_000] * 40 + [5_000_000]  # ~5x the trailing average
+        df = make_bars(closes, volumes=volumes)
+        features = compute_features(df)
+        signal = relative_volume.generate_signal(features, df)
+        self.assertEqual(signal["action"], "BUY")
+
+    def test_skips_without_enough_relative_volume(self):
+        df = flat_bars(n=80)
+        features = compute_features(df)
+        signal = relative_volume.generate_signal(features, df)
+        self.assertEqual(signal["action"], "SKIP")
+
+    def test_skips_a_volume_spike_that_closes_weak(self):
+        # A big volume day that closes near the LOW of its own range --
+        # a distribution day, not a buy signal, despite the volume.
+        closes = [100.0] * 40 + [99.0]
+        volumes = [1_000_000] * 40 + [5_000_000]
+        df = make_bars(closes, volumes=volumes, high_pad=3.0, low_pad=0.05)
+        features = compute_features(df)
+        signal = relative_volume.generate_signal(features, df)
+        self.assertEqual(signal["action"], "SKIP")
+
+    def test_never_raises_on_missing_features(self):
+        signal = relative_volume.generate_signal({}, None)
+        self.assertEqual(signal["action"], "SKIP")
+
+
 class TestEvaluateAll(unittest.TestCase):
     def test_returns_a_verdict_for_every_registered_strategy(self):
         df = uptrend_bars(n=80)
         features = compute_features(df)
         results = evaluate_all(features, df)
-        self.assertEqual(set(results.keys()), {"momentum", "breakout", "mean_reversion", "vwap_reclaim"})
+        self.assertEqual(set(results.keys()), {"momentum", "breakout", "mean_reversion", "pullback", "relative_volume", "vwap_reclaim"})
 
     def test_one_strategy_raising_does_not_break_the_others(self):
         import unittest.mock as mock

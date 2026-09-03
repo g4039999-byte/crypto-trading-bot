@@ -160,4 +160,45 @@ BACKTEST_LOOKBACK_DAYS = _get_int("BACKTEST_LOOKBACK_DAYS", 730)  # ~2y of daily
 BACKTEST_IN_SAMPLE_FRACTION = _get_float("BACKTEST_IN_SAMPLE_FRACTION", 0.7)  # first 70% = in-sample/tune, last 30% = out-of-sample/validate
 BACKTEST_MIN_TRADES_FOR_SIGNIFICANCE = _get_int("BACKTEST_MIN_TRADES_FOR_SIGNIFICANCE", 20)
 
+# --- Market hours gating (src/stocks/market_hours.py) ---
+# Skip full scan cycles while the US market is closed (nights/weekends/
+# holidays) instead of burning data-provider calls on data that hasn't
+# moved -- see market_hours.py's own docstring for exactly what this
+# does and does not model (regular session only, a fixed federal-holiday
+# list, no early-close half-days).
+STOCKS_RESPECT_MARKET_HOURS = _get_bool("STOCKS_RESPECT_MARKET_HOURS", True)
+# How often to re-check "is the market open yet" while waiting through a
+# closed period -- deliberately much coarser than STOCKS_LOOP_INTERVAL_
+# SECONDS, since nothing changes minute to minute overnight.
+STOCKS_MARKET_CLOSED_POLL_SECONDS = _get_float("STOCKS_MARKET_CLOSED_POLL_SECONDS", 300.0)
+
+# --- Health / auto-recovery (src/stocks/health.py) ---
+STOCKS_HEALTH_FILE_NAME = "health_status.json"
+# Exponential backoff for a cycle that raised (data provider down, rate
+# limited, network timeout, etc.) -- same shape as alpaca_client's own
+# per-request backoff, but at the whole-cycle level.
+STOCKS_RECOVERY_BACKOFF_BASE_SECONDS = _get_float("STOCKS_RECOVERY_BACKOFF_BASE_SECONDS", 30.0)
+STOCKS_RECOVERY_BACKOFF_MAX_SECONDS = _get_float("STOCKS_RECOVERY_BACKOFF_MAX_SECONDS", 1800.0)  # cap at 30 min between retries
+
+# --- Self-learning loop (src/stocks/learning_engine.py) ---
+# Never re-evaluate strategies from a handful of fresh paper trades --
+# wait for at least this many NEW closed paper trades since the last
+# learning run before even considering a change (separate from, and in
+# addition to, BACKTEST_MIN_TRADES_FOR_SIGNIFICANCE which gates the
+# *backtest* side of the comparison).
+STOCKS_LEARNING_MIN_NEW_TRADES = _get_int("STOCKS_LEARNING_MIN_NEW_TRADES", 15)
+# Minimum wall-clock time between learning runs regardless of trade
+# count -- re-backtesting every strategy is a real (if free) cost in
+# time/network calls, and strategy quality doesn't meaningfully change
+# hour to hour.
+STOCKS_LEARNING_CHECK_INTERVAL_SECONDS = _get_float("STOCKS_LEARNING_CHECK_INTERVAL_SECONDS", 21600.0)  # 6h
+# A candidate must beat the active strategy's out-of-sample profit
+# factor by at least this many percentage points (not just nominally)
+# to be adopted -- guards against swapping strategies over noise.
+STOCKS_LEARNING_MIN_PF_IMPROVEMENT = _get_float("STOCKS_LEARNING_MIN_PF_IMPROVEMENT", 0.1)
+# If the currently active strategy's OWN live paper trades (since it was
+# activated) accumulate to at least this many and its expectancy turns
+# negative, roll back to the previously active strategy automatically.
+STOCKS_LEARNING_ROLLBACK_MIN_TRADES = _get_int("STOCKS_LEARNING_ROLLBACK_MIN_TRADES", 20)
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

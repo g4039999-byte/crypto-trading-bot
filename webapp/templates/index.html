@@ -295,6 +295,30 @@
     <div class="empty-msg" id="stocks-recent-trades-empty">لا توجد صفقات مغلقة بعد</div>
   </div>
 
+  <div class="card">
+    <h2>🩺 صحة النظام والتعلّم الذاتي</h2>
+    <div class="stats-grid">
+      <div class="stat-box">
+        <div class="label">حالة النظام</div>
+        <div class="value" id="stocks-health-status">—</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">آخر دورة ناجحة</div>
+        <div class="value" id="stocks-health-last-success">—</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">محاولات الاستعادة الكلية</div>
+        <div class="value" id="stocks-health-recoveries">—</div>
+      </div>
+    </div>
+    <div class="muted" style="margin-top:10px;" id="stocks-health-outage"></div>
+    <hr style="border:none; border-top:1px solid var(--border); margin:14px 0;">
+    <div class="muted">
+      حالة محرك التعلّم: <span id="stocks-learning-action">—</span><br>
+      <span id="stocks-learning-reason"></span>
+    </div>
+  </div>
+
   <footer>يتم تحديث البيانات تلقائيًا كل 5 ثوانٍ</footer>
 </div>
 
@@ -505,7 +529,9 @@ function renderStocksStatus(s) {
   renderList("stocks-open-positions-list", "stocks-open-positions-empty", s.open_positions, (p) => `
     <div>
       <div class="item-main">${p.symbol}</div>
-      <div class="item-sub">فُتحت: ${fmtTime(p.opened_at)} · استراتيجية ${p.strategy ?? "—"} · نقاط ${p.entry_score ?? "—"}</div>
+      <div class="item-sub">فُتحت: ${fmtTime(p.opened_at)} · استراتيجية ${p.strategy ?? "—"} · نقاط ${p.entry_score ?? "—"} · حجم نسبي ${p.relative_volume != null ? Number(p.relative_volume).toFixed(2) + "x" : "—"}</div>
+      <div class="item-sub">وقف الخسارة ${p.stop_loss_price != null ? Number(p.stop_loss_price).toFixed(2) : "—"} · جني الأرباح ${p.take_profit_price != null ? Number(p.take_profit_price).toFixed(2) : "—"}${p.trailing_stop_price != null ? " · وقف متحرك " + Number(p.trailing_stop_price).toFixed(2) : ""}</div>
+      <div class="item-sub" title="${p.entry_reason ?? ''}">${(p.entry_reason ?? "").slice(0, 90)}${(p.entry_reason ?? "").length > 90 ? "…" : ""}</div>
     </div>
     <div class="pill">${money(p.size_usd)}</div>
   `);
@@ -513,10 +539,26 @@ function renderStocksStatus(s) {
   renderList("stocks-recent-trades-list", "stocks-recent-trades-empty", s.recent_trades, (t) => `
     <div>
       <div class="item-main">${t.symbol}</div>
-      <div class="item-sub">${t.reason ?? "—"} · ${fmtTime(t.closed_at)} · استراتيجية ${t.strategy ?? "—"}</div>
+      <div class="item-sub">${t.reason ?? "—"} · ${fmtTime(t.closed_at)} · استراتيجية ${t.strategy ?? "—"} · نقاط الدخول ${t.entry_score ?? "—"}</div>
+      <div class="item-sub">أعلى ربح لحظي ${t.mfe_pct != null ? t.mfe_pct + "%" : "—"} · أسوأ تراجع لحظي ${t.mae_pct != null ? t.mae_pct + "%" : "—"} · ${t.pnl_pct != null ? t.pnl_pct + "%" : "—"}</div>
     </div>
     <div class="pill" style="color:${t.is_win ? '#1a9c53' : '#d13b3b'}; font-weight:bold;">${money(t.pnl_usd)}</div>
   `);
+
+  const health = s.system_health || {};
+  const healthLabels = { RUNNING: "🟢 يعمل بشكل طبيعي", RECOVERING: "🟠 يستعيد الاتصال تلقائيًا", DEGRADED: "🔴 انقطاع مستمر — لا يزال يحاول تلقائيًا", STARTING: "⚪ لم يبدأ بعد", UNKNOWN: "⚪ غير معروف" };
+  document.getElementById("stocks-health-status").textContent = healthLabels[health.status] || health.status || "—";
+  document.getElementById("stocks-health-last-success").textContent = fmtTime(health.last_success_at);
+  document.getElementById("stocks-health-recoveries").textContent = health.recovery_attempts_total ?? 0;
+  const outageEl = document.getElementById("stocks-health-outage");
+  outageEl.textContent = health.outage_started_at
+    ? `⚠️ انقطاع مستمر منذ ${fmtTime(health.outage_started_at)} — السبب: ${health.outage_reason ?? "غير معروف"} (يُعاد المحاولة تلقائيًا)`
+    : (health.last_recovery_at ? `✅ آخر استعادة تلقائية: ${fmtTime(health.last_recovery_at)}` : "");
+
+  const learning = s.learning || {};
+  const learningLabels = { adopted: "✅ تم اعتماد استراتيجية أفضل", rolled_back: "↩️ تراجع إلى الاستراتيجية السابقة", no_change: "➖ لا تغيير — الاستراتيجية الحالية ما زالت الأفضل", skipped_insufficient_data: "⏳ بانتظار عيّنة كافية من الصفقات" };
+  document.getElementById("stocks-learning-action").textContent = learning.last_action ? (learningLabels[learning.last_action] || learning.last_action) + (learning.last_run_at ? " (" + fmtTime(learning.last_run_at) + ")" : "") : "لم تعمل بعد";
+  document.getElementById("stocks-learning-reason").textContent = learning.last_action_reason || "";
 }
 
 async function refreshStocks() {

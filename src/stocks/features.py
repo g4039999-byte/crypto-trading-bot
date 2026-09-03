@@ -93,6 +93,7 @@ def compute_features(df):
     rvol = relative_volume(df, 20)
     sma20 = sma(close, 20)
     sma50 = sma(close, 50)
+    ema20 = ema(close, 20)
     rsi14 = rsi(close, 14)
 
     high_20 = df["high"].rolling(window=20, min_periods=20).max()
@@ -115,8 +116,15 @@ def compute_features(df):
         "relative_volume": _last_or_none(rvol),
         "sma20": _last_or_none(sma20),
         "sma50": _last_or_none(sma50),
+        "ema20": _last_or_none(ema20),
         "above_sma20": bool(price > sma20.iloc[-1]) if not sma20.empty and not pd.isna(sma20.iloc[-1]) else None,
         "above_sma50": bool(price > sma50.iloc[-1]) if not sma50.empty and not pd.isna(sma50.iloc[-1]) else None,
+        # EMA20 slope over the last 3 bars, as a % of price -- positive
+        # means the short-term trend line is still rising (a real
+        # pullback happens *within* a rising trend, not after it's
+        # already rolled over), not just "price is near the line".
+        "ema20_slope_pct": float((ema20.iloc[-1] - ema20.iloc[-4]) / price * 100) if len(ema20) >= 4 and not pd.isna(ema20.iloc[-1]) and not pd.isna(ema20.iloc[-4]) and price else None,
+        "pct_from_ema20": float((price - ema20.iloc[-1]) / ema20.iloc[-1] * 100) if not ema20.empty and not pd.isna(ema20.iloc[-1]) else None,
         "rsi14": _last_or_none(rsi14),
         "pct_change_1d": _last_or_none(pct_change_over(df, 1)),
         "pct_change_5d": _last_or_none(pct_change_over(df, 5)),
@@ -131,8 +139,8 @@ def compute_features(df):
 
 def _empty_features():
     keys = (
-        "price", "volume", "atr", "atr_pct", "relative_volume", "sma20", "sma50",
-        "above_sma20", "above_sma50", "rsi14", "pct_change_1d", "pct_change_5d",
+        "price", "volume", "atr", "atr_pct", "relative_volume", "sma20", "sma50", "ema20",
+        "above_sma20", "above_sma50", "ema20_slope_pct", "pct_from_ema20", "rsi14", "pct_change_1d", "pct_change_5d",
         "pct_change_20d", "high_20d", "low_20d", "pct_from_20d_high", "pct_from_20d_low", "spread_pct",
     )
     return {k: None for k in keys}

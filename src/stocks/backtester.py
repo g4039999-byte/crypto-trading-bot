@@ -1,6 +1,7 @@
 """Historical backtest engine for the daily-bar strategies (momentum,
-breakout, mean_reversion -- vwap_reclaim is intraday-only, see its own
-module docstring for why it isn't covered here). Uses
+breakout, mean_reversion, pullback, relative_volume -- vwap_reclaim is
+intraday-only, see its own module docstring for why it isn't covered
+here). Uses
 src.stocks.data_provider (yfinance by default -- free, no account
 needed) so this runs with zero configuration.
 

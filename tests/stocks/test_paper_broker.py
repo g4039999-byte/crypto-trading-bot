@@ -91,6 +91,52 @@ class TestPaperBroker(unittest.TestCase):
         self.assertIsNotNone(position)
         self.assertIsNotNone(result)
 
+    def test_save_state_is_atomic_no_partial_file_survives_a_write_failure(self):
+        # Simulate a crash mid-write (json.dump raising partway through) --
+        # the real state file on disk must be completely untouched, and no
+        # stray temp file should be left behind either.
+        pb.open_position("AAPL", 100.0, 500.0, atr_at_entry=2.0)
+        original_bytes = pb.STATE_FILE.read_bytes()
+
+        with mock.patch("json.dump", side_effect=RuntimeError("disk full mid-write")):
+            with self.assertRaises(RuntimeError):
+                pb.save_state(pb.load_state())
+
+        self.assertEqual(pb.STATE_FILE.read_bytes(), original_bytes)  # untouched, not truncated/corrupted
+        leftover_tmp_files = list(pb.STATE_FILE.parent.glob(".paper_positions_*.tmp"))
+        self.assertEqual(leftover_tmp_files, [])
+
+    def test_load_state_after_restart_sees_a_position_opened_before_the_crash(self):
+        # Simulates the exact restart-safety property item 22 asks for:
+        # a fresh load_state() call (as a freshly-restarted process would
+        # make) must see the position an earlier process already committed.
+        pb.open_position("AAPL", 100.0, 500.0, atr_at_entry=2.0)
+        reloaded = pb.load_state()  # a brand new read, not the in-memory value
+        self.assertEqual(len(reloaded["open_positions"]), 1)
+        self.assertEqual(reloaded["open_positions"][0]["symbol"], "AAPL")
+
+    def test_a_corrupt_state_file_is_preserved_for_forensics_not_silently_dropped(self):
+        pb.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        pb.STATE_FILE.write_text("{not valid json at all", encoding="utf-8")
+
+        state = pb.load_state()
+
+        self.assertEqual(state["open_positions"], [])  # safe fallback
+        self.assertFalse(pb.STATE_FILE.exists())  # moved aside, not left as garbage at the real path
+        preserved = list(pb.STATE_FILE.parent.glob("paper_positions.corrupt.*.json"))
+        self.assertEqual(len(preserved), 1)
+
+    def test_reopening_an_already_held_symbol_is_prevented_by_the_engine_not_the_broker(self):
+        # paper_broker itself has no built-in "reject a duplicate symbol"
+        # guard -- that check lives in src.stocks.engine.evaluate_entry
+        # (see tests/stocks/test_engine.py's already-holding test) and
+        # depends entirely on this module's state being restart-safe,
+        # which the tests above verify directly.
+        pb.open_position("AAPL", 100.0, 500.0, atr_at_entry=2.0)
+        state_after_restart = pb.load_state()
+        already_held = any(p["symbol"] == "AAPL" for p in state_after_restart["open_positions"])
+        self.assertTrue(already_held)
+
 
 if __name__ == "__main__":
     unittest.main()

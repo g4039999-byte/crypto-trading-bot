@@ -393,6 +393,8 @@ def build_stocks_status():
     data, not an error.
     """
     try:
+        from src.stocks import health as stocks_health
+        from src.stocks import learning_engine as stocks_learning
         from src.stocks.config import STOCKS_LIVE_TRADING, STOCKS_MAX_OPEN_POSITIONS, STOCKS_STARTING_CAPITAL_USD
         from src.stocks.paper_broker import load_state as load_stocks_state
         from src.stocks.strategy_registry import get_active_strategy, list_versions
@@ -415,6 +417,10 @@ def build_stocks_status():
             "symbol": p.get("symbol"), "size_usd": _fmt_money(p.get("size_usd")),
             "entry_price": p.get("entry_price"), "opened_at": p.get("opened_at"),
             "strategy": p.get("strategy"), "entry_score": p.get("entry_score"),
+            "entry_reason": p.get("entry_reason"),
+            "stop_loss_price": p.get("stop_loss_price"), "take_profit_price": p.get("take_profit_price"),
+            "trailing_stop_price": p.get("trailing_stop_price"),
+            "relative_volume": (p.get("features_snapshot") or {}).get("relative_volume"),
         } for p in open_positions]
 
         recent_closed = sorted(closed_trades, key=lambda t: t.get("closed_at") or "", reverse=True)[:10]
@@ -422,8 +428,11 @@ def build_stocks_status():
             "symbol": t.get("symbol"), "pnl_usd": _fmt_money(t.get("pnl_usd")),
             "pnl_pct": round(t.get("pnl_pct"), 2) if t.get("pnl_pct") is not None else None,
             "is_win": (t.get("pnl_usd") or 0) > 0, "reason": t.get("reason"),
-            "closed_at": t.get("closed_at"), "strategy": t.get("strategy"),
-            "was_correct": t.get("was_correct"),
+            "opened_at": t.get("opened_at"), "closed_at": t.get("closed_at"), "strategy": t.get("strategy"),
+            "was_correct": t.get("was_correct"), "entry_score": t.get("entry_score"),
+            "entry_reason": t.get("entry_reason"),
+            "mfe_pct": round(t["mfe_pct"], 2) if t.get("mfe_pct") is not None else None,
+            "mae_pct": round(t["mae_pct"], 2) if t.get("mae_pct") is not None else None,
         } for t in recent_closed]
 
         last_cycle_path = PROJECT_ROOT / "data" / "stocks" / "last_cycle.json"
@@ -436,6 +445,9 @@ def build_stocks_status():
 
         versions = list_versions()
         last_adopted = versions[-1] if versions else None
+
+        health_state = stocks_health.load_health()
+        learning_state = stocks_learning.get_learning_state()
 
         return {
             "process_running": process_running,
@@ -456,6 +468,21 @@ def build_stocks_status():
             "active_strategy": get_active_strategy(),
             "last_adopted_version": last_adopted,
             "last_cycle": last_cycle,
+            "system_health": {
+                "status": health_state.get("status"),
+                "last_success_at": health_state.get("last_success_at"),
+                "consecutive_failures": health_state.get("consecutive_failures"),
+                "recovery_attempts_total": health_state.get("recovery_attempts_total"),
+                "outage_started_at": health_state.get("outage_started_at"),
+                "outage_reason": health_state.get("outage_reason"),
+                "last_recovery_at": health_state.get("last_recovery_at"),
+            },
+            "learning": {
+                "last_run_at": learning_state.get("last_run_at"),
+                "last_action": learning_state.get("last_action"),
+                "last_action_reason": learning_state.get("last_action_reason"),
+                "recent_history": (learning_state.get("history") or [])[-5:],
+            },
             "server_time": datetime.now(timezone.utc).isoformat(),
         }
     except Exception:
@@ -466,6 +493,10 @@ def build_stocks_status():
                         "starting_capital_usd": 0, "win_rate_pct": None, "drawdown_pct": 0, "closed_trade_count": 0},
             "open_positions": [], "recent_trades": [], "max_open_positions": 0,
             "active_strategy": None, "last_adopted_version": None, "last_cycle": None,
+            "system_health": {"status": "UNKNOWN", "last_success_at": None, "consecutive_failures": None,
+                               "recovery_attempts_total": None, "outage_started_at": None,
+                               "outage_reason": None, "last_recovery_at": None},
+            "learning": {"last_run_at": None, "last_action": None, "last_action_reason": None, "recent_history": []},
             "server_time": datetime.now(timezone.utc).isoformat(),
         }
 
