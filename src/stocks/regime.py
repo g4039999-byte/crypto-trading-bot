@@ -9,7 +9,9 @@ instead of applying the same rules regardless of market conditions.
 
 import logging
 
-from src.stocks.features import compute_features
+import pandas as pd
+
+from src.stocks.features import compute_features, pct_change_over, sma, true_range
 from src.stocks.data_provider import get_provider
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,50 @@ def classify_regime(features):
 
     return {"trend": trend, "volatility": volatility, "risk_appetite": risk_appetite,
             "pct_change_20d": pct_change_20d, "atr_pct": atr_pct}
+
+
+def compute_regime_series(df):
+    """The same classify_regime() logic as a per-date Series over an
+    ENTIRE historical DataFrame at once, computed with plain vectorized
+    pandas operations rather than calling compute_features()/
+    classify_regime() once per day (which would redo an O(n) rolling
+    computation n times -- O(n^2) total -- for no benefit, since every
+    input classify_regime() needs is itself already a simple rolling
+    series). Used by src.stocks.research_pipeline to tag thousands of
+    historical backtest trades with "what was the market regime on this
+    trade's entry date" cheaply, as one precomputation per research run
+    rather than per trade.
+
+    Returns a DataFrame indexed like `df`, columns: trend, volatility,
+    risk_appetite -- identical values to what classify_regime(features)
+    would produce for a features dict computed as of that same date.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["trend", "volatility", "risk_appetite"])
+
+    close = df["close"]
+    pct_20d = pct_change_over(df, 20)
+    sma50 = sma(close, 50)
+    above_sma50 = close > sma50
+    atr14 = true_range(df).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    atr_pct = (atr14 / close * 100)
+
+    trend = pd.Series(REGIME_SIDEWAYS, index=df.index)
+    trend = trend.where(~((pct_20d > 3) & above_sma50), REGIME_BULLISH)
+    trend = trend.where(~((pct_20d < -3) & ~above_sma50), REGIME_BEARISH)
+    # Rows with no signal yet (NaN pct_20d/sma50) fall back to SIDEWAYS,
+    # matching classify_regime()'s own "not enough data -> SIDEWAYS" rule.
+    trend = trend.where(pct_20d.notna() & above_sma50.notna(), REGIME_SIDEWAYS)
+
+    volatility = pd.Series(VOLATILITY_HIGH, index=df.index)
+    volatility = volatility.where(~(atr_pct < _HIGH_VOLATILITY_ATR_PCT), VOLATILITY_LOW)
+    volatility = volatility.where(atr_pct.notna(), VOLATILITY_HIGH)  # unknown -- cautious, same as classify_regime()
+
+    risk_appetite = pd.Series("risk-on", index=df.index)
+    risk_off_mask = (trend == REGIME_BEARISH) | (volatility == VOLATILITY_HIGH)
+    risk_appetite = risk_appetite.where(~risk_off_mask, "risk-off")
+
+    return pd.DataFrame({"trend": trend, "volatility": volatility, "risk_appetite": risk_appetite})
 
 
 def current_regime(symbol=None):

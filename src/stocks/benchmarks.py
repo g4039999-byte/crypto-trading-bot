@@ -10,11 +10,19 @@ positive return on its own.
   src.stocks.strategies.momentum needs to beat to justify its extra
   complexity.
 - simple_volume_baseline: naive "volume spike -> hold N days", no
-  trend/quality filtering at all -- what breakout.py needs to beat.
+  trend/quality filtering at all -- what relative_volume.py needs to beat.
+- simple_breakout_baseline: naive "new N-day high -> hold N days", no
+  volume confirmation at all -- what src.stocks.strategies.breakout
+  needs to beat to justify requiring volume confirmation.
+
+All go through src.stocks.bar_cache like src.stocks.backtester does, so
+a research run comparing baselines against every strategy shares the
+same cached, already-fetched bars rather than re-downloading them.
 """
 
 import logging
 
+from src.stocks import bar_cache
 from src.stocks.data_provider import get_provider
 from src.stocks.features import compute_features, relative_volume, sma
 
@@ -24,10 +32,14 @@ HOLD_DAYS = 10
 MIN_BARS = 55
 
 
+def _fetch_bars(symbols, lookback_days):
+    provider = get_provider()
+    return bar_cache.get_daily_bars_batch_cached(provider, list(symbols), lookback_days)
+
+
 def buy_and_hold(symbols, lookback_days=730):
     """One "trade" per symbol: hold the whole lookback window."""
-    provider = get_provider()
-    bars = provider.get_daily_bars_batch(list(symbols), lookback_days)
+    bars = _fetch_bars(symbols, lookback_days)
     pnl_pcts = []
     for symbol, df in bars.items():
         if df is None or len(df) < 2:
@@ -43,8 +55,7 @@ def simple_momentum_baseline(symbols, lookback_days=730, hold_days=HOLD_DAYS):
     """Buy whenever price crosses above its 50d SMA (no other filter),
     hold a fixed number of days, sell -- deliberately naive.
     """
-    provider = get_provider()
-    bars = provider.get_daily_bars_batch(list(symbols), lookback_days)
+    bars = _fetch_bars(symbols, lookback_days)
     pnl_pcts = []
     for symbol, df in bars.items():
         if df is None or len(df) < MIN_BARS + hold_days:
@@ -69,8 +80,7 @@ def simple_volume_baseline(symbols, lookback_days=730, hold_days=HOLD_DAYS, rvol
     """Buy whenever relative volume spikes above rvol_threshold (no
     trend/quality filter at all), hold a fixed number of days, sell.
     """
-    provider = get_provider()
-    bars = provider.get_daily_bars_batch(list(symbols), lookback_days)
+    bars = _fetch_bars(symbols, lookback_days)
     pnl_pcts = []
     for symbol, df in bars.items():
         if df is None or len(df) < MIN_BARS + hold_days:
@@ -80,6 +90,35 @@ def simple_volume_baseline(symbols, lookback_days=730, hold_days=HOLD_DAYS, rvol
         while i < len(df) - hold_days - 1:
             value = rvol.iloc[i]
             if value is not None and not _isna(value) and value >= rvol_threshold:
+                entry = float(df["open"].iloc[i + 1])
+                exit_price = float(df["close"].iloc[i + 1 + hold_days])
+                if entry > 0:
+                    pnl_pcts.append((exit_price - entry) / entry * 100)
+                i += hold_days + 1
+                continue
+            i += 1
+    return pnl_pcts
+
+
+def simple_breakout_baseline(symbols, lookback_days=730, hold_days=HOLD_DAYS, breakout_lookback=20):
+    """Buy whenever price closes strictly above the PRIOR `breakout_
+    lookback` days' high (no volume confirmation at all -- the
+    deliberate omission that distinguishes this from src.stocks.
+    strategies.breakout, and "prior days" rather than an inclusive
+    rolling high so a single day's own high, which always sits above
+    its own close by construction, can't make this condition
+    unsatisfiable), hold a fixed number of days, sell.
+    """
+    bars = _fetch_bars(symbols, lookback_days)
+    pnl_pcts = []
+    for symbol, df in bars.items():
+        if df is None or len(df) < MIN_BARS + hold_days:
+            continue
+        rolling_high = df["high"].shift(1).rolling(window=breakout_lookback, min_periods=breakout_lookback).max()
+        i = MIN_BARS
+        while i < len(df) - hold_days - 1:
+            high_value = rolling_high.iloc[i]
+            if high_value is not None and not _isna(high_value) and df["close"].iloc[i] > high_value:
                 entry = float(df["open"].iloc[i + 1])
                 exit_price = float(df["close"].iloc[i + 1 + hold_days])
                 if entry > 0:

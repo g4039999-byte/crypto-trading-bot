@@ -2,7 +2,16 @@ import unittest
 
 import pandas as pd
 
-from src.stocks.features import atr, compute_features, relative_volume, rsi, sma, vwap
+from src.stocks.features import (
+    atr,
+    compute_features,
+    compute_features_series,
+    features_row_to_dict,
+    relative_volume,
+    rsi,
+    sma,
+    vwap,
+)
 from tests.stocks.helpers import downtrend_bars, flat_bars, make_bars, uptrend_bars
 
 
@@ -72,6 +81,62 @@ class TestComputeFeatures(unittest.TestCase):
         df = flat_bars(n=80, noise=0.05)
         features = compute_features(df)
         self.assertLess(features["atr_pct"], 2.0)
+
+
+class TestComputeFeaturesSeriesParity(unittest.TestCase):
+    """compute_features_series() exists purely as a performance
+    optimization for src.stocks.backtester (avoiding an O(n^2)
+    recomputation of compute_features(df.iloc[:i+1]) at every historical
+    bar) -- it MUST produce byte-for-byte-equivalent values to
+    compute_features() at every row, or the backtester would be
+    simulating against different numbers than the live loop actually
+    trades on. These tests are the guarantee that substitution is safe.
+    """
+
+    def _assert_row_matches_reference(self, df, i):
+        series = compute_features_series(df)
+        row_dict = features_row_to_dict(series.iloc[i])
+        window = df.iloc[: i + 1]
+        expected = compute_features(window)
+        for key in expected:
+            actual = row_dict[key]
+            exp = expected[key]
+            if exp is None:
+                self.assertIsNone(actual, f"{key} at row {i}: expected None, got {actual}")
+            elif isinstance(exp, bool):
+                self.assertEqual(actual, exp, f"{key} at row {i}")
+            else:
+                self.assertAlmostEqual(actual, exp, places=6, msg=f"{key} at row {i}")
+
+    def test_matches_compute_features_across_many_rows_of_an_uptrend(self):
+        df = uptrend_bars(n=120, daily_gain_pct=0.5)
+        for i in (10, 30, 55, 60, 90, 119):
+            self._assert_row_matches_reference(df, i)
+
+    def test_matches_compute_features_across_many_rows_of_a_downtrend(self):
+        df = downtrend_bars(n=120, daily_loss_pct=0.5)
+        for i in (30, 55, 90, 119):
+            self._assert_row_matches_reference(df, i)
+
+    def test_matches_compute_features_on_a_flat_market(self):
+        df = flat_bars(n=120)
+        for i in (30, 55, 90, 119):
+            self._assert_row_matches_reference(df, i)
+
+    def test_early_rows_with_insufficient_history_are_none_not_wrongly_false_or_zero(self):
+        df = uptrend_bars(n=80)
+        self._assert_row_matches_reference(df, 5)  # far too little history for SMA50/ATR14/etc.
+
+    def test_empty_or_short_dataframe_returns_an_empty_frame_not_a_crash(self):
+        empty_df = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        result = compute_features_series(empty_df)
+        self.assertTrue(result.empty)
+
+    def test_features_row_to_dict_of_none_returns_the_empty_features_shape(self):
+        row_dict = features_row_to_dict(None)
+        empty_shape = compute_features(None)
+        self.assertEqual(set(row_dict.keys()), set(empty_shape.keys()))
+        self.assertIsNone(row_dict["price"])
 
 
 if __name__ == "__main__":

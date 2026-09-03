@@ -137,6 +137,99 @@ def compute_features(df):
     }
 
 
+def compute_features_series(df):
+    """The same values compute_features() returns for the LATEST bar,
+    computed as a full per-date DataFrame in ONE vectorized pass instead
+    of one scalar dict per call. Used by src.stocks.backtester to avoid
+    the O(n^2) cost of calling compute_features(df.iloc[:i+1]) fresh at
+    every one of a symbol's n historical bars (each such call redoes
+    every rolling/EWM computation over the ENTIRE window up to that
+    point -- fine for the live loop's single "latest bar" call, ruinous
+    multiplied by thousands of bars in a multi-year backtest). Every
+    column here is computed with the exact same formula compute_features
+    uses -- see tests/stocks/test_features.py's parity tests, which
+    assert this matches compute_features(df.iloc[:i+1]) row for row.
+
+    Returns a DataFrame indexed like `df`; rows with insufficient
+    history for a given column hold NaN there, same as compute_features
+    returns None for that key on a short history.
+    """
+    if df is None or df.empty or len(df) < 2:
+        return pd.DataFrame(index=df.index if df is not None else None)
+
+    close = df["close"]
+    price = close
+
+    atr14 = atr(df, 14)
+    rvol = relative_volume(df, 20)
+    sma20 = sma(close, 20)
+    sma50 = sma(close, 50)
+    ema20 = ema(close, 20)
+    rsi14 = rsi(close, 14)
+    high_20 = df["high"].rolling(window=20, min_periods=20).max()
+    low_20 = df["low"].rolling(window=20, min_periods=20).min()
+    ema20_prior3 = ema20.shift(3)
+
+    return pd.DataFrame({
+        "price": price,
+        "volume": df["volume"].astype(float),
+        "atr": atr14,
+        "atr_pct": atr14 / price * 100,
+        "relative_volume": rvol,
+        "sma20": sma20,
+        "sma50": sma50,
+        "ema20": ema20,
+        # bool comparisons against a NaN SMA silently evaluate to False
+        # in pandas rather than propagating NaN -- .where() re-masks
+        # those early-history rows back to NaN so they correctly become
+        # None (not a wrong False) via features_row_to_dict(), matching
+        # compute_features()'s own explicit not-NaN guard.
+        "above_sma20": (price > sma20).where(sma20.notna()),
+        "above_sma50": (price > sma50).where(sma50.notna()),
+        "ema20_slope_pct": (ema20 - ema20_prior3) / price * 100,
+        "pct_from_ema20": (price - ema20) / ema20 * 100,
+        "rsi14": rsi14,
+        "pct_change_1d": pct_change_over(df, 1),
+        "pct_change_5d": pct_change_over(df, 5),
+        "pct_change_20d": pct_change_over(df, 20),
+        "high_20d": high_20,
+        "low_20d": low_20,
+        "pct_from_20d_high": (price - high_20) / high_20 * 100,
+        "pct_from_20d_low": (price - low_20) / low_20 * 100,
+        "spread_pct": (df["high"] - df["low"]) / price * 100,
+    }, index=df.index)
+
+
+def features_row_to_dict(row):
+    """One row of compute_features_series()'s output -> the same plain-
+    float/bool/None dict shape compute_features() returns -- NaN
+    becomes None, above_sma20/above_sma50 become real Python bool (or
+    None), everything else becomes float (or None). Keeps the strategy
+    modules' generate_signal(features, df) interface completely
+    unchanged regardless of which computation path produced `features`.
+    """
+    if row is None:
+        return _empty_features()
+
+    def _f(key):
+        value = row.get(key)
+        return None if value is None or pd.isna(value) else float(value)
+
+    def _b(key):
+        value = row.get(key)
+        return None if value is None or pd.isna(value) else bool(value)
+
+    return {
+        "price": _f("price"), "volume": _f("volume"), "atr": _f("atr"), "atr_pct": _f("atr_pct"),
+        "relative_volume": _f("relative_volume"), "sma20": _f("sma20"), "sma50": _f("sma50"), "ema20": _f("ema20"),
+        "above_sma20": _b("above_sma20"), "above_sma50": _b("above_sma50"),
+        "ema20_slope_pct": _f("ema20_slope_pct"), "pct_from_ema20": _f("pct_from_ema20"), "rsi14": _f("rsi14"),
+        "pct_change_1d": _f("pct_change_1d"), "pct_change_5d": _f("pct_change_5d"), "pct_change_20d": _f("pct_change_20d"),
+        "high_20d": _f("high_20d"), "low_20d": _f("low_20d"),
+        "pct_from_20d_high": _f("pct_from_20d_high"), "pct_from_20d_low": _f("pct_from_20d_low"), "spread_pct": _f("spread_pct"),
+    }
+
+
 def _empty_features():
     keys = (
         "price", "volume", "atr", "atr_pct", "relative_volume", "sma20", "sma50", "ema20",

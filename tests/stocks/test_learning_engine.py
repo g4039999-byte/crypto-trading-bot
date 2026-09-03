@@ -28,26 +28,56 @@ class TestLearningEngine(unittest.TestCase):
             p.stop()
         self._tmp_dir.cleanup()
 
-    # --- gating ---
+    # --- gating: TIME ALONE must be sufficient to run the historical-
+    # backtest-driven search (item 13's fix) -- new-trade count can only
+    # make a cycle run EARLIER, never required to make one run at all. ---
 
-    def test_skips_when_too_few_new_closed_trades(self):
-        with mock.patch.object(le, "load_state", return_value={"closed_trades": [{"pnl_pct": 1.0}] * 3}):
-            state = le.run_learning_cycle(force=False)
-        self.assertEqual(state["last_action"], "skipped_insufficient_data")
-
-    def test_skips_when_checked_too_recently_even_with_enough_new_trades(self):
-        # The first call below has no prior last_run_at, so it clears
-        # BOTH gates and runs the full pipeline for real -- mock
-        # get_active_strategy/backtest_strategy so that first "priming"
-        # run stays fully offline, same as every other test here.
-        with mock.patch.object(le, "load_state", return_value={"closed_trades": [{"pnl_pct": 1.0}] * 30}), \
+    def _prime_last_run_at(self, trade_count=0):
+        """Run one cycle now (so state.last_run_at is set to 'now') --
+        used to set up "checked too recently" scenarios for the tests
+        below. Fully offline: no real backtest/network call.
+        """
+        with mock.patch.object(le, "load_state", return_value={"closed_trades": [{"pnl_pct": 1.0}] * trade_count}), \
              mock.patch.object(le, "get_active_strategy", return_value="breakout"), \
              mock.patch.object(le, "backtest_strategy", return_value=[]):
-            le.run_learning_cycle(force=False)  # first call establishes last_run_at + closed_trades_seen=30
-        with mock.patch.object(le, "load_state", return_value={"closed_trades": [{"pnl_pct": 1.0}] * 60}):
-            state = le.run_learning_cycle(force=False)  # 30 new trades, but no time has passed
+            le.run_learning_cycle(force=False)
+
+    def test_a_fresh_install_with_zero_live_trades_still_runs_on_the_first_call(self):
+        # No prior last_run_at at all -- must NOT be blocked by having
+        # zero closed paper trades. This is the exact bug item 13 reports.
+        with mock.patch.object(le, "load_state", return_value={"closed_trades": []}), \
+             mock.patch.object(le, "get_active_strategy", return_value="breakout"), \
+             mock.patch.object(le, "backtest_strategy", return_value=[]) as mock_backtest:
+            state = le.run_learning_cycle(force=False)
+        mock_backtest.assert_called()  # the backtest step actually ran
+        self.assertNotEqual(state["last_action"], "skipped_insufficient_data")
+
+    def test_enough_time_passed_runs_even_with_zero_new_trades(self):
+        self._prime_last_run_at(trade_count=0)
+        with mock.patch.object(le, "load_state", return_value={"closed_trades": []}), \
+             mock.patch.object(le, "_seconds_since", return_value=99999999), \
+             mock.patch.object(le, "get_active_strategy", return_value="breakout"), \
+             mock.patch.object(le, "backtest_strategy", return_value=[]) as mock_backtest:
+            state = le.run_learning_cycle(force=False)
+        mock_backtest.assert_called()
+        self.assertNotEqual(state["last_action"], "skipped_insufficient_data")
+
+    def test_enough_new_trades_runs_even_though_checked_recently(self):
+        self._prime_last_run_at(trade_count=0)
+        with mock.patch.object(le, "load_state", return_value={"closed_trades": [{"pnl_pct": 1.0}] * 30}), \
+             mock.patch.object(le, "get_active_strategy", return_value="breakout"), \
+             mock.patch.object(le, "backtest_strategy", return_value=[]) as mock_backtest:
+            state = le.run_learning_cycle(force=False)  # 30 new trades, but almost no time has passed
+        mock_backtest.assert_called()
+        self.assertNotEqual(state["last_action"], "skipped_insufficient_data")
+
+    def test_skips_only_when_neither_enough_time_nor_enough_new_trades(self):
+        self._prime_last_run_at(trade_count=0)
+        with mock.patch.object(le, "load_state", return_value={"closed_trades": [{"pnl_pct": 1.0}] * 3}), \
+             mock.patch.object(le, "backtest_strategy") as mock_backtest:
+            state = le.run_learning_cycle(force=False)  # too little time AND too few new trades
+        mock_backtest.assert_not_called()
         self.assertEqual(state["last_action"], "skipped_insufficient_data")
-        self.assertIn("recently", state["last_action_reason"])
 
     def test_force_bypasses_both_gates(self):
         with mock.patch.object(le, "load_state", return_value={"closed_trades": []}), \

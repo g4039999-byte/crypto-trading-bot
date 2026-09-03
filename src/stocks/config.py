@@ -156,9 +156,58 @@ STOCKS_TRAILING_ARM_ATR_MULT = _get_float("STOCKS_TRAILING_ARM_ATR_MULT", 1.5)
 STOCKS_MAX_HOLDING_DAYS = _get_float("STOCKS_MAX_HOLDING_DAYS", 10.0)
 
 # --- Backtesting ---
-BACKTEST_LOOKBACK_DAYS = _get_int("BACKTEST_LOOKBACK_DAYS", 730)  # ~2y of daily bars
+BACKTEST_LOOKBACK_DAYS = _get_int("BACKTEST_LOOKBACK_DAYS", 730)  # ~2y of daily bars -- used by the live loop's periodic learning check (src.stocks.learning_engine), kept short so that runs fast every few hours
 BACKTEST_IN_SAMPLE_FRACTION = _get_float("BACKTEST_IN_SAMPLE_FRACTION", 0.7)  # first 70% = in-sample/tune, last 30% = out-of-sample/validate
 BACKTEST_MIN_TRADES_FOR_SIGNIFICANCE = _get_int("BACKTEST_MIN_TRADES_FOR_SIGNIFICANCE", 20)
+# How many symbols to backtest concurrently (src.stocks.backtester) --
+# yfinance calls are I/O-bound and pandas releases the GIL during most
+# of its C-level work, so threads (not processes, which would need
+# every strategy module to be picklable across a process boundary) give
+# a real wall-clock win without any of that complexity.
+BACKTEST_MAX_WORKERS = _get_int("BACKTEST_MAX_WORKERS", 8)
+
+# --- Historical research pipeline (src/stocks/research_pipeline.py) ---
+# A much deeper lookback than the live loop's periodic check above --
+# this is what turns "a couple hundred backtest trades" into thousands
+# across the universe, the actual point of a large-scale historical
+# study. yfinance serves ~10 years of daily bars for established large/
+# mid-caps for free, so this asks for that without needing a paid data
+# vendor.
+RESEARCH_LOOKBACK_DAYS = _get_int("RESEARCH_LOOKBACK_DAYS", 3650)  # ~10y
+# How many (roughly equal, calendar-order) folds to split each symbol's
+# trade history into for walk-forward-style robustness reporting -- see
+# research_pipeline.py's own docstring for why this is done by bucketing
+# already-simulated trades by entry date rather than re-running the
+# simulation per fold (a single causal, no-lookahead pass already
+# produces every trade; which calendar period a completed trade's entry
+# falls into is just a label on it afterward).
+RESEARCH_WALK_FORWARD_FOLDS = _get_int("RESEARCH_WALK_FORWARD_FOLDS", 5)
+
+# --- Bar cache (src/stocks/bar_cache.py) ---
+# Daily bars only change once a day (at market close) -- there is no
+# reason a research run started twice in the same day should ever
+# refetch the same symbol's history from yfinance/Alpaca.
+STOCKS_BAR_CACHE_TTL_HOURS = _get_float("STOCKS_BAR_CACHE_TTL_HOURS", 20.0)
+
+# --- Realistic trading costs (src/stocks/backtester.py) ---
+# Applied to every simulated fill (backtest AND, via risk_engine's
+# position sizing being unaffected but paper_broker recording the same
+# constants for consistency, paper trading) so historical results
+# aren't flattering an execution that couldn't really be achieved.
+# Slippage: the fill price moves against the trader by this many basis
+# points from the reference price (next bar's open on entry, this bar's
+# stop/target level on exit) -- a conservative, symmetric estimate for
+# the liquid large/mid-cap universe this project trades; it is NOT a
+# substitute for a real market-impact model, just a floor under
+# "assume you get the exact printed price for free", which no real fill
+# ever does.
+STOCKS_SLIPPAGE_BPS = _get_float("STOCKS_SLIPPAGE_BPS", 5.0)  # 0.05%
+# Alpaca's paper/live equities trading is commission-free (as of this
+# writing) -- 0.0 here reflects that real, current fact about the
+# specific broker this project targets, not an assumption that trading
+# is free in general. Overridable if that ever changes or a different
+# broker is swapped in.
+STOCKS_COMMISSION_PER_TRADE_USD = _get_float("STOCKS_COMMISSION_PER_TRADE_USD", 0.0)
 
 # --- Market hours gating (src/stocks/market_hours.py) ---
 # Skip full scan cycles while the US market is closed (nights/weekends/
@@ -181,11 +230,16 @@ STOCKS_RECOVERY_BACKOFF_BASE_SECONDS = _get_float("STOCKS_RECOVERY_BACKOFF_BASE_
 STOCKS_RECOVERY_BACKOFF_MAX_SECONDS = _get_float("STOCKS_RECOVERY_BACKOFF_MAX_SECONDS", 1800.0)  # cap at 30 min between retries
 
 # --- Self-learning loop (src/stocks/learning_engine.py) ---
-# Never re-evaluate strategies from a handful of fresh paper trades --
-# wait for at least this many NEW closed paper trades since the last
-# learning run before even considering a change (separate from, and in
-# addition to, BACKTEST_MIN_TRADES_FOR_SIGNIFICANCE which gates the
-# *backtest* side of the comparison).
+# NOTE on what this gates: the historical-backtest-driven candidate
+# search (comparing every strategy's fresh out-of-sample numbers) needs
+# NO live paper trades at all -- it's pure backtest, gated only by
+# STOCKS_LEARNING_CHECK_INTERVAL_SECONDS below so it doesn't re-run
+# every 5-minute cycle. STOCKS_LEARNING_MIN_NEW_TRADES/_ROLLBACK_MIN_
+# TRADES below gate ONLY the separate rollback check, which by
+# definition needs the active strategy's own live results to judge --
+# there is no backtest substitute for "how did this strategy actually
+# perform once real (paper) money was on it". Never wait on live trade
+# count before benefiting from historical evidence.
 STOCKS_LEARNING_MIN_NEW_TRADES = _get_int("STOCKS_LEARNING_MIN_NEW_TRADES", 15)
 # Minimum wall-clock time between learning runs regardless of trade
 # count -- re-backtesting every strategy is a real (if free) cost in

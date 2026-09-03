@@ -154,13 +154,20 @@ def run_learning_cycle(force=False):
     closed_trades = load_state().get("closed_trades", [])
     new_trade_count = len(closed_trades) - state.get("closed_trades_seen", 0)
 
-    if not force:
-        if new_trade_count < STOCKS_LEARNING_MIN_NEW_TRADES:
-            return _record(state, "skipped_insufficient_data",
-                            f"only {new_trade_count} new closed paper trade(s) since last run "
-                            f"(need {STOCKS_LEARNING_MIN_NEW_TRADES})")
-        if _seconds_since(state.get("last_run_at")) < STOCKS_LEARNING_CHECK_INTERVAL_SECONDS:
-            return _record(state, "skipped_insufficient_data", "checked too recently -- see STOCKS_LEARNING_CHECK_INTERVAL_SECONDS")
+    # The historical-backtest-driven search below (Step 2) needs no live
+    # paper trades at all -- gating it on trade count would mean a quiet
+    # market (0 new closed trades) blocks it forever, exactly the bug
+    # this OR-based check avoids: TIME ALONE is sufficient to run a
+    # cycle; a burst of new trades can only make it run EARLIER, never
+    # required to make it run at all. See STOCKS_LEARNING_MIN_NEW_TRADES'
+    # own comment in config.py.
+    enough_time_passed = _seconds_since(state.get("last_run_at")) >= STOCKS_LEARNING_CHECK_INTERVAL_SECONDS
+    enough_new_trades = new_trade_count >= STOCKS_LEARNING_MIN_NEW_TRADES
+    if not force and not (enough_time_passed or enough_new_trades):
+        return _record(state, "skipped_insufficient_data",
+                        f"checked too recently and only {new_trade_count} new closed paper trade(s) "
+                        f"since last run -- next run in <={STOCKS_LEARNING_CHECK_INTERVAL_SECONDS:.0f}s "
+                        f"or after {STOCKS_LEARNING_MIN_NEW_TRADES} new trades, whichever comes first")
 
     state["closed_trades_seen"] = len(closed_trades)
 
