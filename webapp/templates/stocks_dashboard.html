@@ -135,6 +135,52 @@
   .kv-list .k { color: var(--muted); }
 
   [title] { cursor: help; border-bottom: 1px dotted var(--muted); }
+
+  /* ---------- Hero stats (Equity / Daily / Total / Drawdown) ---------- */
+  .hero-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 14px; }
+  @media (max-width: 900px) { .hero-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .hero-grid { grid-template-columns: 1fr; } }
+  .hero-stat {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px;
+    border-right: 4px solid var(--blue);
+  }
+  .hero-stat.tone-pos { border-right-color: var(--green); }
+  .hero-stat.tone-neg { border-right-color: var(--red); }
+  .hero-stat .label { font-size: 12.5px; color: var(--muted); margin-bottom: 8px; display: flex; align-items: center; gap: 5px; }
+  .hero-stat .value { font-size: 28px; font-weight: 800; letter-spacing: -.3px; }
+  .hero-stat .value.pos { color: var(--green); }
+  .hero-stat .value.neg { color: var(--red); }
+  .hero-stat .sub { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+
+  /* ---------- Market status card ---------- */
+  .market-card { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+  .market-card .market-main { font-size: 19px; font-weight: bold; }
+  .badge.trend-bullish { background: var(--green-bg); color: var(--green); }
+  .badge.trend-bearish { background: var(--red-bg); color: var(--red); }
+  .badge.trend-sideways { background: var(--orange-bg); color: var(--orange); }
+  .badge.vol-high { background: var(--red-bg); color: var(--red); }
+  .badge.vol-low { background: var(--blue-bg); color: var(--blue); }
+
+  /* ---------- Live-trading locked banner ---------- */
+  .locked-card {
+    background: linear-gradient(135deg, rgba(234,57,67,.10), rgba(234,57,67,.03));
+    border: 1px solid var(--red); border-radius: 14px; padding: 16px 18px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .locked-card .lock-icon { font-size: 26px; }
+  .locked-card .lock-title { font-weight: 800; color: var(--red); font-size: 15px; }
+  .locked-card .lock-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .pill.locked { background: rgba(234,57,67,.16); color: var(--red); border: 1px solid rgba(234,57,67,.4); font-weight: 800; }
+
+  /* ---------- Legacy/test-trade tag ---------- */
+  .badge.legacy { background: var(--orange-bg); color: var(--orange); margin-inline-start: 6px; }
+
+  /* ---------- Confidence bar (opportunity scanner) ---------- */
+  .conf-bar-wrap { display: inline-flex; align-items: center; gap: 6px; min-width: 60px; }
+  .conf-bar-track { width: 42px; height: 6px; border-radius: 3px; background: var(--card2); overflow: hidden; }
+  .conf-bar-fill { height: 100%; background: var(--blue); border-radius: 3px; }
+  .conf-bar-fill.high { background: var(--green); }
+  .conf-bar-fill.low { background: var(--orange); }
 </style>
 </head>
 <body>
@@ -147,7 +193,7 @@
     <span class="pill gray" id="pill-market">السوق: —</span>
     <span class="pill gray" id="pill-bot">البوت: —</span>
     <span class="pill blue">📝 Paper Trading فقط</span>
-    <span class="pill gray" id="pill-live" title="لا يوجد أي مسار برمجي لتفعيل التداول الحقيقي في هذا النظام">🔒 Live Trading: مقفل دائمًا</span>
+    <span class="pill locked" id="pill-live" title="لا يوجد أي مسار برمجي لتفعيل التداول الحقيقي في هذا النظام">🔒 Live Trading: متوقف ومقفل دائمًا</span>
     <div style="flex:1"></div>
     <button class="ctrl-btn start" id="btn-start" onclick="doAction('/api/stocks/start')">▶ تشغيل</button>
     <button class="ctrl-btn stop" id="btn-stop" onclick="doAction('/api/stocks/stop')">⏸ إيقاف</button>
@@ -174,15 +220,51 @@
   <!-- ============ Overview ============ -->
   <section id="overview">
     <h2>🧭 نظرة عامة <span class="hint">كل ما تحتاج معرفته خلال ٥ ثوانٍ</span></h2>
+
+    <!-- Hero row: the four numbers that matter most, first and biggest -->
+    <div class="hero-grid">
+      <div class="hero-stat" id="hero-equity-card">
+        <div class="label">💰 القيمة الإجمالية (Equity)</div>
+        <div class="value num" id="ov-equity">—</div>
+        <div class="sub">رأس المال الابتدائي: <span class="num" id="ov-starting">—</span></div>
+      </div>
+      <div class="hero-stat" id="hero-daily-card">
+        <div class="label">📅 ربح/خسارة اليوم</div>
+        <div class="value num" id="ov-daily">—</div>
+      </div>
+      <div class="hero-stat" id="hero-total-card">
+        <div class="label">Σ ربح/خسارة إجمالي</div>
+        <div class="value num" id="ov-total">—</div>
+      </div>
+      <div class="hero-stat" id="hero-drawdown-card">
+        <div class="label" title="أكبر تراجع من أعلى قمة لرأس المال المحقق">📉 التراجع (Drawdown)</div>
+        <div class="value num" id="ov-drawdown">—</div>
+      </div>
+    </div>
+
+    <!-- Market status + Live-trading-locked: the other two "at a glance" facts -->
+    <div class="grid cols-2" style="margin-bottom:12px;">
+      <div class="card market-card">
+        <div>
+          <div class="label" style="font-size:12.5px; color:var(--muted); margin-bottom:6px;">🌐 حالة السوق</div>
+          <div class="market-main" id="market-status-main">—</div>
+        </div>
+        <span class="badge" id="market-trend-badge">—</span>
+        <span class="badge" id="market-vol-badge">—</span>
+      </div>
+      <div class="locked-card">
+        <div class="lock-icon">🔒</div>
+        <div>
+          <div class="lock-title">Live Trading — مقفل ومتوقف دائمًا</div>
+          <div class="lock-sub">Paper Trading فقط. لا يوجد أي زر أو إعداد في هذا النظام يمكنه تفعيل تداول حقيقي.</div>
+        </div>
+      </div>
+    </div>
+
     <div class="grid cols-4">
-      <div class="stat"><div class="label">💰 القيمة الإجمالية (Equity)</div><div class="value num" id="ov-equity">—</div><div class="sub">رأس المال الابتدائي: <span class="num" id="ov-starting">—</span></div></div>
       <div class="stat"><div class="label">💵 النقد المتاح</div><div class="value num" id="ov-cash">—</div></div>
       <div class="stat"><div class="label" title="ربح/خسارة الصفقات المفتوحة حاليًا، لم تتحقق بعد">📈 ربح/خسارة غير محقق</div><div class="value num" id="ov-unrealized">—</div></div>
       <div class="stat"><div class="label" title="ربح/خسارة الصفقات المغلقة فعليًا">✅ ربح/خسارة محقق</div><div class="value num" id="ov-realized">—</div></div>
-
-      <div class="stat"><div class="label">📅 ربح/خسارة اليوم</div><div class="value num" id="ov-daily">—</div></div>
-      <div class="stat"><div class="label">Σ الإجمالي الكلي</div><div class="value num" id="ov-total">—</div></div>
-      <div class="stat"><div class="label" title="أكبر تراجع من أعلى قمة لرأس المال المحقق">📉 التراجع (Drawdown)</div><div class="value num" id="ov-drawdown">—</div></div>
       <div class="stat"><div class="label" title="نسبة الصفقات المغلقة الرابحة">🎯 نسبة الفوز</div><div class="value num" id="ov-winrate">—</div></div>
 
       <div class="stat"><div class="label" title="إجمالي الأرباح ÷ إجمالي الخسائر — أعلى من 1 يعني ربحية">⚖️ Profit Factor</div><div class="value num" id="ov-pf">—</div></div>
@@ -199,13 +281,13 @@
 
   <!-- ============ Opportunity Scanner ============ -->
   <section id="scanner">
-    <h2>🔎 ماسح الفرص <span class="hint">مرتبة حسب Opportunity Score — اضغط على أي سهم للتفاصيل</span></h2>
+    <h2>🔎 ماسح الفرص <span class="hint">مرتبة حسب Opportunity Score — اضغط على أي سطر للتفاصيل الكاملة (السعر، %التغيّر، الحجم النسبي، ATR، R/R)</span></h2>
     <div class="card">
       <div class="table-scroll">
         <table>
           <thead><tr>
-            <th>السهم</th><th>السعر</th><th>%اليوم</th><th>Rel.Vol</th><th>Score</th>
-            <th>الاستراتيجية</th><th>الحالة</th><th>R/R</th>
+            <th>السهم (Ticker)</th><th>النقاط (Score)</th><th>الاستراتيجية (Strategy)</th>
+            <th>الدخول (Entry)</th><th>الهدف (Target)</th><th>الوقف (Stop)</th><th>الثقة (Confidence)</th>
           </tr></thead>
           <tbody id="scanner-body"></tbody>
         </table>
@@ -418,6 +500,23 @@ const MARKET_LABELS = { OPEN: "🟢 مفتوح", PRE_MARKET: "🌅 ما قبل �
 const HEALTH_LABELS = { RUNNING: "🟢 يعمل بشكل طبيعي", RECOVERING: "🟠 يستعيد الاتصال تلقائيًا", DEGRADED: "🔴 انقطاع مستمر (يحاول تلقائيًا)", STARTING: "⚪ بدء التشغيل", UNKNOWN: "⚪ غير معروف" };
 const LEARNING_LABELS = { adopted: "✅ تم اعتماد تحسين", rolled_back: "↩️ تراجع لنسخة سابقة", no_change: "➖ لا تغيير", skipped_insufficient_data: "⏳ بانتظار بيانات كافية" };
 const REASON_LABELS = { stop_loss: "وقف خسارة", trailing_stop: "وقف متحرك", take_profit: "جني أرباح", max_holding_time: "انتهاء مدة الاحتفاظ" };
+const TREND_LABELS = { BULLISH: "📈 صاعد", BEARISH: "📉 هابط", SIDEWAYS: "➖ عرضي" };
+const TREND_BADGE_CLASS = { BULLISH: "trend-bullish", BEARISH: "trend-bearish", SIDEWAYS: "trend-sideways" };
+const VOL_LABELS = { HIGH: "⚡ تقلب مرتفع", LOW: "🌊 تقلب منخفض" };
+const VOL_BADGE_CLASS = { HIGH: "vol-high", LOW: "vol-low" };
+
+// Known one-off positions opened manually during development/testing,
+// BEFORE the continuously-running loop (with all its fixes) was the
+// thing actually placing paper trades -- tagged here (display-only, no
+// backend/engine change) purely so they're never mistaken for a trade
+// the live strategy actually chose. Matched on the exact symbol AND
+// opened_at pair, so this can never mislabel a genuine future trade.
+const LEGACY_TEST_POSITIONS = [
+  { symbol: "SNOW", opened_at: "2026-09-03T14:29:12.964600+00:00" },
+];
+function isLegacyTestPosition(p) {
+  return LEGACY_TEST_POSITIONS.some(l => l.symbol === p.symbol && l.opened_at === p.opened_at);
+}
 
 // ---------- lightweight SVG charts (no external dependencies) ----------
 function lineChart(el, points, opts = {}) {
@@ -583,6 +682,33 @@ function renderOverview(d) {
   setPnl("ov-daily", ov.daily_pnl_usd);
   setPnl("ov-total", ov.total_pnl_usd);
 
+  // Hero cards get a colored accent edge too, not just the number's own color
+  const setHeroTone = (cardId, v) => {
+    const card = document.getElementById(cardId);
+    card.className = "hero-stat " + (v > 0 ? "tone-pos" : (v < 0 ? "tone-neg" : ""));
+  };
+  setHeroTone("hero-daily-card", ov.daily_pnl_usd);
+  setHeroTone("hero-total-card", ov.total_pnl_usd);
+  document.getElementById("hero-drawdown-card").className = "hero-stat " + (ov.drawdown_pct > 0 ? "tone-neg" : "");
+
+  // Market status card: open/closed + trend + volatility, all together
+  const marketMain = document.getElementById("market-status-main");
+  marketMain.textContent = MARKET_LABELS[d.market_status] || d.market_status;
+  marketMain.style.color = d.market_status === "OPEN" ? "var(--green)" : "var(--text)";
+  const regime = d.market_intelligence?.regime;
+  const trendBadge = document.getElementById("market-trend-badge");
+  const volBadge = document.getElementById("market-vol-badge");
+  if (regime) {
+    trendBadge.textContent = TREND_LABELS[regime.trend] || regime.trend || "—";
+    trendBadge.className = "badge " + (TREND_BADGE_CLASS[regime.trend] || "");
+    volBadge.textContent = VOL_LABELS[regime.volatility] || regime.volatility || "—";
+    volBadge.className = "badge " + (VOL_BADGE_CLASS[regime.volatility] || "");
+  } else {
+    trendBadge.textContent = "بيانات السوق غير متاحة بعد";
+    trendBadge.className = "badge skip";
+    volBadge.textContent = "";
+  }
+
   document.getElementById("ov-drawdown").textContent = ov.drawdown_pct != null ? ov.drawdown_pct + "%" : "—";
   document.getElementById("ov-winrate").textContent = ov.win_rate_pct != null ? ov.win_rate_pct + "%" : "—";
   document.getElementById("ov-pf").textContent = ov.profit_factor != null ? plainNum(ov.profit_factor) : "—";
@@ -595,26 +721,33 @@ function renderOverview(d) {
   document.getElementById("ov-maxpos").textContent = "الحد الأقصى: " + ov.max_open_positions;
 }
 
+function confidenceBar(c) {
+  if (c == null) return `<span class="num">—</span>`;
+  const pctVal = Math.max(0, Math.min(100, Math.round(c * 100)));
+  const tone = pctVal >= 70 ? "high" : (pctVal < 40 ? "low" : "");
+  return `<span class="conf-bar-wrap"><span class="conf-bar-track"><span class="conf-bar-fill ${tone}" style="width:${pctVal}%"></span></span><span class="num">${pctVal}%</span></span>`;
+}
+
 function renderScanner(d) {
   const rows = d.opportunities || [];
   document.getElementById("scanner-empty").style.display = rows.length ? "none" : "block";
   document.getElementById("scanner-body").innerHTML = rows.map((o, i) => `
     <tr onclick="toggleDetail('scan-${i}')">
-      <td><b>${o.symbol}</b></td>
-      <td class="num">${o.price != null ? plainNum(o.price) : "—"}</td>
-      <td class="num ${pnlClass(o.pct_change_1d)}">${o.pct_change_1d != null ? pct(o.pct_change_1d) : "—"}</td>
-      <td class="num">${o.relative_volume != null ? plainNum(o.relative_volume) + "x" : "—"}</td>
+      <td><b>${o.symbol}</b> <span class="badge ${o.action === 'BUY' ? 'buy' : 'skip'}">${o.action === 'BUY' ? 'شراء' : 'تخطّي'}</span></td>
       <td class="num"><b>${o.score ?? "—"}</b></td>
       <td>${o.strategy || "—"}</td>
-      <td><span class="badge ${o.action === 'BUY' ? 'buy' : 'skip'}">${o.action === 'BUY' ? 'شراء' : 'تخطّي'}</span></td>
-      <td class="num">${o.risk_reward != null ? plainNum(o.risk_reward) : "—"}</td>
+      <td class="num">${o.entry_zone != null ? plainNum(o.entry_zone) : "—"}</td>
+      <td class="num">${o.take_profit != null ? plainNum(o.take_profit) : "—"}</td>
+      <td class="num">${o.stop_loss != null ? plainNum(o.stop_loss) : "—"}</td>
+      <td>${o.strategy ? confidenceBar(o.strategy_confidence) : '<span class="num">—</span>'}</td>
     </tr>
-    <tr id="scan-${i}" style="display:none;"><td colspan="8" style="background:var(--card2); font-size:12.5px; color:var(--muted); padding:10px 14px;">
+    <tr id="scan-${i}" style="display:none;"><td colspan="7" style="background:var(--card2); font-size:12.5px; color:var(--muted); padding:10px 14px;">
       <b style="color:var(--text)">السبب:</b> ${o.reason || "—"} ·
-      <b style="color:var(--text)">منطقة الدخول:</b> ${o.entry_zone != null ? plainNum(o.entry_zone) : "—"} ·
-      <b style="color:var(--text)">وقف الخسارة:</b> ${o.stop_loss != null ? plainNum(o.stop_loss) : "—"} ·
-      <b style="color:var(--text)">جني الأرباح:</b> ${o.take_profit != null ? plainNum(o.take_profit) : "—"} ·
-      <b style="color:var(--text)">ATR%:</b> ${o.atr_pct != null ? plainNum(o.atr_pct) : "—"}
+      <b style="color:var(--text)">السعر الحالي:</b> ${o.price != null ? plainNum(o.price) : "—"} ·
+      <b style="color:var(--text)">%التغيّر اليوم:</b> <span class="${pnlClass(o.pct_change_1d)}">${o.pct_change_1d != null ? pct(o.pct_change_1d) : "—"}</span> ·
+      <b style="color:var(--text)">الحجم النسبي:</b> ${o.relative_volume != null ? plainNum(o.relative_volume) + "x" : "—"} ·
+      <b style="color:var(--text)">ATR%:</b> ${o.atr_pct != null ? plainNum(o.atr_pct) : "—"} ·
+      <b style="color:var(--text)">Risk/Reward:</b> ${o.risk_reward != null ? plainNum(o.risk_reward) : "—"}
     </td></tr>
   `).join("");
 }
@@ -628,7 +761,7 @@ function renderPositions(d) {
   document.getElementById("positions-empty").style.display = rows.length ? "none" : "block";
   document.getElementById("positions-body").innerHTML = rows.map(p => `
     <tr>
-      <td><b>${p.symbol}</b></td>
+      <td><b>${p.symbol}</b>${isLegacyTestPosition(p) ? '<span class="badge legacy" title="صفقة يدوية من مرحلة التطوير، وليست ناتجة عن حلقة التداول المستمرة الفعلية — لا تختلط بالصفقات الجديدة">🕰️ صفقة اختبار قديمة</span>' : ''}</td>
       <td class="num">${plainNum(p.entry_price)}</td>
       <td class="num">${p.current_price != null ? plainNum(p.current_price) : "بانتظار السعر…"}</td>
       <td class="num">${money(p.size_usd)}</td>
@@ -648,7 +781,7 @@ function renderHistory(d) {
   document.getElementById("history-body").innerHTML = rows.map((t, i) => `
     <tr onclick="toggleDetail('hist-${i}')">
       <td>${fmtTime(t.closed_at)}</td>
-      <td><b>${t.symbol}</b></td>
+      <td><b>${t.symbol}</b>${isLegacyTestPosition(t) ? '<span class="badge legacy" title="صفقة يدوية من مرحلة التطوير">🕰️ اختبار قديم</span>' : ''}</td>
       <td class="num">${plainNum(t.entry_price)}</td>
       <td class="num">${plainNum(t.exit_price)}</td>
       <td class="num ${pnlClass(t.pnl_usd)}">${money(t.pnl_usd)}</td>

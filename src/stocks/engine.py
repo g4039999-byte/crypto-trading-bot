@@ -87,12 +87,12 @@ def evaluate_entry(symbol, candidate, regime, state):
     if scored["score"] < STOCKS_MIN_SCORE:
         reason = f"score {scored['score']} below minimum {STOCKS_MIN_SCORE}"
         log_decision("SKIP", symbol, reason, extra={"score": scored["score"]})
-        return {"action": "SKIP", "reason": reason, "score": scored["score"]}
+        return {"action": "SKIP", "reason": reason, "score": scored["score"], "strategy": scored.get("best_strategy"), "strategy_confidence": scored.get("strategy_confidence")}
 
     if not scored["best_strategy"]:
         reason = "no strategy produced a BUY signal for this candidate"
         log_decision("SKIP", symbol, reason, extra={"score": scored["score"]})
-        return {"action": "SKIP", "reason": reason, "score": scored["score"]}
+        return {"action": "SKIP", "reason": reason, "score": scored["score"], "strategy_confidence": scored.get("strategy_confidence")}
 
     size_usd = compute_position_size_usd(state, risk_multiplier(regime))
     if size_usd <= 0:
@@ -118,6 +118,7 @@ def evaluate_entry(symbol, candidate, regime, state):
     return {
         "action": "BUY", "reason": reason, "size_usd": size_usd,
         "score": scored["score"], "strategy": scored["best_strategy"],
+        "strategy_confidence": scored.get("strategy_confidence"),
         "atr": atr_value, "features": features, "regime": regime,
         "x_entity": x_signal["entity"] if x_signal else None,
     }
@@ -156,6 +157,7 @@ def _opportunity_snapshot(symbol, candidate, decision):
         "atr_pct": features.get("atr_pct"),
         "score": decision.get("score"),
         "strategy": decision.get("strategy"),
+        "strategy_confidence": decision.get("strategy_confidence"),
         "action": decision.get("action"),
         "reason": decision.get("reason"),
         "entry_zone": price,

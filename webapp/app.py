@@ -609,7 +609,8 @@ def build_stocks_dashboard():
         opportunities_view = [{
             "symbol": o.get("symbol"), "price": o.get("price"), "pct_change_1d": o.get("pct_change_1d"),
             "volume": o.get("volume"), "relative_volume": o.get("relative_volume"), "atr_pct": o.get("atr_pct"),
-            "score": o.get("score"), "strategy": o.get("strategy"), "action": o.get("action"), "reason": o.get("reason"),
+            "score": o.get("score"), "strategy": o.get("strategy"), "strategy_confidence": o.get("strategy_confidence"),
+            "action": o.get("action"), "reason": o.get("reason"),
             "entry_zone": o.get("entry_zone"), "stop_loss": o.get("stop_loss"), "take_profit": o.get("take_profit"),
             "risk_reward": o.get("risk_reward"),
         } for o in opportunities]

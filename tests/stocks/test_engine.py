@@ -259,6 +259,30 @@ class TestOpportunitySnapshot(_EngineTestIsolation):
         self.assertGreater(snapshot["take_profit"], snapshot["price"])
         self.assertGreater(snapshot["risk_reward"], 0)
 
+    def test_snapshot_carries_the_strategy_confidence_already_computed_for_the_real_decision(self):
+        # A pure display-only expose of a value evaluate_entry() already
+        # computes for scoring -- not a new computation, and doesn't
+        # change what evaluate_entry() itself decides.
+        candidate = {"features": {"price": 100.0, "atr": 2.0}}
+        decision = {"action": "BUY", "score": 70, "strategy": "breakout", "strategy_confidence": 0.82, "reason": "r", "atr": 2.0}
+        snapshot = engine._opportunity_snapshot("AAPL", candidate, decision)
+        self.assertEqual(snapshot["strategy_confidence"], 0.82)
+
+    def test_evaluate_entry_includes_strategy_confidence_for_a_real_buy(self):
+        df = uptrend_bars(n=80, daily_gain_pct=0.6, volume=2_000_000)
+        df.iloc[-1, df.columns.get_loc("volume")] = 5_000_000
+        features = compute_features(df)
+        candidate = {"features": features, "df": df}
+        state = {"open_positions": [], "closed_trades": [], "daily_pnl_usd": {}, "trades_today": {}, "peak_equity_usd": 10000.0}
+        regime = {"trend": "BULLISH", "risk_appetite": "risk-on"}
+
+        with mock.patch("src.stocks.strategy_registry.get_active_strategy", return_value=None):
+            decision = engine.evaluate_entry("AAPL", candidate, regime, state)
+
+        if decision["action"] == "BUY":
+            self.assertIsNotNone(decision.get("strategy_confidence"))
+            self.assertGreater(decision["strategy_confidence"], 0)
+
     def test_a_skip_decision_with_a_score_still_shows_illustrative_levels(self):
         candidate = {"features": {"price": 50.0, "atr": 1.0, "pct_change_1d": -0.5, "volume": 1_000_000, "relative_volume": 0.8, "atr_pct": 2.0}}
         decision = {"action": "SKIP", "score": 30, "reason": "score 30 below minimum 55"}

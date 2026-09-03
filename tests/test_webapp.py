@@ -394,6 +394,21 @@ class TestBuildStocksDashboard(unittest.TestCase):
             mock.patch.object(webapp_module, "_read_last_cycle", return_value=last_cycle),
         ]
 
+    def test_opportunities_include_strategy_confidence_for_the_scanner(self):
+        # Regression: build_stocks_dashboard()'s own opportunities_view
+        # mapping once silently dropped strategy_confidence even though
+        # src.stocks.engine already wrote it into last_cycle.json --
+        # caught via a real jsdom run against the live server showing
+        # "—" instead of a real percentage in the Confidence column.
+        last_cycle = {"scanned": 1, "candidates": 1, "opportunities": [
+            {"symbol": "AAPL", "score": 70, "strategy": "breakout", "strategy_confidence": 0.82,
+             "action": "BUY", "reason": "r", "price": 100.0, "entry_zone": 100.0, "stop_loss": 95.0, "take_profit": 110.0},
+        ]}
+        patches = self._patch_common(last_cycle=last_cycle)
+        with self._enter_patches(patches):
+            d = webapp_module.build_stocks_dashboard()
+        self.assertEqual(d["opportunities"][0]["strategy_confidence"], 0.82)
+
     def test_empty_state_is_fully_shaped_and_never_raises(self):
         patches = self._patch_common()
         with self._enter_patches(patches):
