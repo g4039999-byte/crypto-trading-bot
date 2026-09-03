@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>بوت التداول</title>
+<style>
+  :root {
+    --bg: #f4f6f8;
+    --card: #ffffff;
+    --text: #1c2530;
+    --muted: #6b7684;
+    --border: #e3e7ec;
+    --green: #1a9c53;
+    --green-bg: #e6f7ee;
+    --red: #d13b3b;
+    --red-bg: #fdecec;
+    --orange: #d97a1f;
+    --orange-bg: #fdf1e2;
+    --blue: #1f6fd9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+    font-size: 18px;
+    line-height: 1.6;
+    padding-bottom: 40px;
+  }
+  header {
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 20px 24px;
+    text-align: center;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 26px;
+  }
+  .wrap {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px 16px;
+  }
+
+  /* حالة النظام الكبيرة */
+  .status-banner {
+    text-align: center;
+    font-size: 24px;
+    font-weight: bold;
+    padding: 22px;
+    border-radius: 16px;
+    margin-bottom: 18px;
+    transition: background 0.2s, color 0.2s;
+  }
+  .status-banner.running { background: var(--green-bg); color: var(--green); }
+  .status-banner.stopped { background: var(--red-bg); color: var(--red); }
+  .status-banner.emergency { background: var(--orange-bg); color: var(--orange); }
+
+  /* أزرار التحكم */
+  .controls {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+  .controls button {
+    flex: 1 1 200px;
+    padding: 22px 12px;
+    font-size: 20px;
+    font-weight: bold;
+    border: none;
+    border-radius: 14px;
+    cursor: pointer;
+    color: #fff;
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  .controls button:active { transform: scale(0.98); }
+  .controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #btn-start { background: var(--green); }
+  #btn-stop { background: #4a5563; }
+  #btn-emergency { background: var(--red); }
+
+  .toast {
+    text-align: center;
+    padding: 12px;
+    border-radius: 10px;
+    margin-bottom: 18px;
+    font-size: 16px;
+    display: none;
+    background: #eef2ff;
+    color: #2a3a8f;
+  }
+
+  /* بطاقات */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    margin: 0 0 12px;
+    font-size: 19px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .muted { color: var(--muted); font-size: 15px; }
+
+  /* شبكة الأرصدة */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+  }
+  .stat-box {
+    background: var(--bg);
+    border-radius: 12px;
+    padding: 14px;
+    text-align: center;
+  }
+  .stat-box .label { font-size: 14px; color: var(--muted); margin-bottom: 6px; }
+  .stat-box .value { font-size: 22px; font-weight: bold; }
+  .value.pos { color: var(--green); }
+  .value.neg { color: var(--red); }
+
+  /* قوائم */
+  ul.list { list-style: none; margin: 0; padding: 0; }
+  ul.list li {
+    padding: 12px 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  ul.list li:last-child { border-bottom: none; }
+  .item-main { font-weight: bold; }
+  .item-sub { color: var(--muted); font-size: 14px; }
+  .pill {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 13px;
+    background: var(--bg);
+  }
+  .empty-msg { color: var(--muted); text-align: center; padding: 14px 0; }
+
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 20px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🚀 لوحة تحكم بوت التداول</h1>
+  <div class="muted">تداول تجريبي (Paper Trading) — بدون أموال حقيقية</div>
+</header>
+
+<div class="wrap">
+
+  <div id="status-banner" class="status-banner stopped">جاري التحميل…</div>
+
+  <div class="controls">
+    <button id="btn-start" onclick="doAction('/api/start')">🟢 تشغيل التداول</button>
+    <button id="btn-stop" onclick="doAction('/api/stop')">🔴 إيقاف التداول</button>
+    <button id="btn-emergency" onclick="confirmEmergency()">🛑 إيقاف طوارئ</button>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <!-- الرصيد والأرباح -->
+  <div class="card">
+    <h2>💰 الرصيد والأرباح</h2>
+    <div class="stats-grid">
+      <div class="stat-box">
+        <div class="label">الرصيد التقديري</div>
+        <div class="value" id="stat-balance">—</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">نقد متاح</div>
+        <div class="value" id="stat-cash">—</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">ربح/خسارة اليوم</div>
+        <div class="value" id="stat-today-pnl">—</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">ربح/خسارة إجمالي</div>
+        <div class="value" id="stat-total-pnl">—</div>
+      </div>
+    </div>
+    <div class="muted" style="margin-top:10px;">
+      رأس المال الافتراضي للتداول التجريبي: <span id="stat-capital">—</span>
+    </div>
+  </div>
+
+  <!-- الصفقات المفتوحة -->
+  <div class="card">
+    <h2>📂 الصفقات المفتوحة</h2>
+    <ul class="list" id="open-positions-list"></ul>
+    <div class="empty-msg" id="open-positions-empty">لا توجد صفقات مفتوحة حاليًا</div>
+  </div>
+
+  <!-- آخر الصفقات -->
+  <div class="card">
+    <h2>🧾 آخر الصفقات</h2>
+    <ul class="list" id="recent-trades-list"></ul>
+    <div class="empty-msg" id="recent-trades-empty">لا توجد صفقات مغلقة بعد</div>
+  </div>
+
+  <!-- حالة الرادار وأفضل الفرص -->
+  <div class="card">
+    <h2>📡 حالة الرادار</h2>
+    <div class="muted">
+      عدد الفرص المتتبعة: <span id="radar-count">—</span> ·
+      آخر تحديث: <span id="radar-last-update">—</span>
+    </div>
+    <h2 style="margin-top:16px;">⭐ أفضل الفرص المكتشفة</h2>
+    <ul class="list" id="opportunities-list"></ul>
+    <div class="empty-msg" id="opportunities-empty">لا توجد فرص مكتشفة بعد</div>
+  </div>
+
+  <!-- الأخبار والإشارات -->
+  <div class="card">
+    <h2>📰 الأخبار والإشارات المهمة</h2>
+    <ul class="list" id="news-list"></ul>
+    <div class="empty-msg" id="news-empty">لا توجد إشارات إخبارية نشطة حاليًا</div>
+  </div>
+
+  <footer>يتم تحديث البيانات تلقائيًا كل 5 ثوانٍ</footer>
+</div>
+
+<script>
+const money = (v) => {
+  if (v === null || v === undefined) return "—";
+  const n = Number(v);
+  const sign = n > 0 ? "+" : "";
+  return sign + n.toFixed(2) + " $";
+};
+
+const fmtTime = (iso) => {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString("ar-EG", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+  } catch (e) { return iso; }
+};
+
+function showToast(msg) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.style.display = "block";
+  clearTimeout(window._toastTimer);
+  window._toastTimer = setTimeout(() => { el.style.display = "none"; }, 4000);
+}
+
+function setButtonsBusy(busy) {
+  ["btn-start", "btn-stop", "btn-emergency"].forEach(id => {
+    document.getElementById(id).disabled = busy;
+  });
+}
+
+// كل طلب لديه مهلة زمنية قصوى، حتى لا يبقى الزر معطلاً إلى الأبد إذا
+// تعطّل الخادم أو لم يرد على الإطلاق -- بعد انتهاء المهلة يُلغى الطلب
+// تلقائيًا وتظهر رسالة خطأ واضحة بدلاً من التعليق الصامت.
+const ACTION_TIMEOUT_MS = 15000;
+const STATUS_TIMEOUT_MS = 6000;
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function doAction(url) {
+  setButtonsBusy(true);
+  try {
+    const res = await fetchWithTimeout(url, { method: "POST" }, ACTION_TIMEOUT_MS);
+    const data = await res.json();
+    showToast(data.message);
+    renderStatus(data.status);
+  } catch (e) {
+    if (e.name === "AbortError") {
+      showToast(`⏱️ انتهت مهلة الاتصال بالخادم (${ACTION_TIMEOUT_MS / 1000} ثوانٍ) — تأكد أن الخادم يعمل وحاول مرة أخرى`);
+    } else {
+      showToast("⚠️ حدث خطأ في الاتصال بالخادم");
+    }
+  } finally {
+    setButtonsBusy(false);
+  }
+}
+
+function confirmEmergency() {
+  if (confirm("هل أنت متأكد من إيقاف الطوارئ؟ سيتم إيقاف كل شيء فورًا.")) {
+    doAction("/api/emergency");
+  }
+}
+
+function renderList(containerId, emptyId, items, renderItem) {
+  const ul = document.getElementById(containerId);
+  const empty = document.getElementById(emptyId);
+  ul.innerHTML = "";
+  if (!items || items.length === 0) {
+    empty.style.display = "block";
+    return;
+  }
+  empty.style.display = "none";
+  items.forEach(item => {
+    const li = document.createElement("li");
+    li.innerHTML = renderItem(item);
+    ul.appendChild(li);
+  });
+}
+
+function renderStatus(s) {
+  const banner = document.getElementById("status-banner");
+  banner.textContent = s.system_label;
+  banner.className = "status-banner " +
+    (s.system_state === "RUNNING" ? "running" : s.system_state === "EMERGENCY" ? "emergency" : "stopped");
+
+  document.getElementById("stat-balance").textContent = money(s.balance.estimated_balance_usd);
+  document.getElementById("stat-cash").textContent = money(s.balance.available_cash_usd);
+
+  const todayEl = document.getElementById("stat-today-pnl");
+  todayEl.textContent = money(s.balance.today_pnl_usd);
+  todayEl.className = "value " + (s.balance.today_pnl_usd > 0 ? "pos" : s.balance.today_pnl_usd < 0 ? "neg" : "");
+
+  const totalEl = document.getElementById("stat-total-pnl");
+  totalEl.textContent = money(s.balance.total_pnl_usd);
+  totalEl.className = "value " + (s.balance.total_pnl_usd > 0 ? "pos" : s.balance.total_pnl_usd < 0 ? "neg" : "");
+
+  document.getElementById("stat-capital").textContent = money(s.balance.starting_capital_usd);
+
+  renderList("open-positions-list", "open-positions-empty", s.open_positions, (p) => `
+    <div>
+      <div class="item-main">${p.symbol}</div>
+      <div class="item-sub">فُتحت: ${fmtTime(p.opened_at)}</div>
+    </div>
+    <div class="pill">حجم الصفقة: ${money(p.size_usd)}</div>
+  `);
+
+  renderList("recent-trades-list", "recent-trades-empty", s.recent_trades, (t) => `
+    <div>
+      <div class="item-main">${t.symbol}</div>
+      <div class="item-sub">${t.reason} · ${fmtTime(t.closed_at)}</div>
+    </div>
+    <div class="pill" style="color:${t.is_win ? '#1a9c53' : '#d13b3b'}; font-weight:bold;">${money(t.pnl_usd)}</div>
+  `);
+
+  document.getElementById("radar-count").textContent = s.radar.tracked_count;
+  document.getElementById("radar-last-update").textContent = fmtTime(s.radar.last_update);
+
+  renderList("opportunities-list", "opportunities-empty", s.radar.top_opportunities, (o) => `
+    <div>
+      <div class="item-main">${o.symbol} <span class="pill">${o.status}</span></div>
+      <div class="item-sub">${o.trend} ${o.news_count > 0 ? "· 📰 " + o.news_count + " خبر" : ""}</div>
+    </div>
+    <div class="pill">النقاط: ${o.score ?? "—"}</div>
+  `);
+
+  renderList("news-list", "news-empty", s.news, (n) => `
+    <div>
+      <div class="item-main">${n.event_type} — ${n.sentiment}</div>
+      <div class="item-sub">${n.text}</div>
+      <div class="item-sub">الأصول: ${n.assets}</div>
+    </div>
+    <div class="pill">${n.urgency}</div>
+  `);
+}
+
+async function refresh() {
+  try {
+    const res = await fetchWithTimeout("/api/status", {}, STATUS_TIMEOUT_MS);
+    const data = await res.json();
+    renderStatus(data);
+  } catch (e) {
+    document.getElementById("status-banner").textContent =
+      e.name === "AbortError" ? "⏱️ تعذّر الاتصال بالخادم (انتهت المهلة)" : "⚠️ تعذّر الاتصال بالخادم";
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+
+</body>
+</html>

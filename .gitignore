@@ -20,3 +20,8 @@ data/paper_trade_log.jsonl
 # above; never contains secrets.
 data/snapshots.json
 data/opportunity_watchlist.json
+
+# webapp/ runtime state -- the PID of the paper-radar process the web
+# control panel is currently managing. Local-machine-only, regenerated
+# every Start/Stop, never contains secrets.
+data/webapp_radar.pid

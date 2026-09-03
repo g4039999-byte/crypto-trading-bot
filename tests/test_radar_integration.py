@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import src.news_signal_engine as news_signal_engine
+import src.opportunity_watchlist as opportunity_watchlist
 import src.snapshot as snapshot
 from src import radar
 
@@ -47,13 +49,28 @@ FIXTURE_PAIRS = [
 
 class TestRadarIntegration(unittest.TestCase):
     def setUp(self):
+        # radar.run_radar() now also calls opportunity_watchlist.update_from_results()
+        # and attach_news_signals() unconditionally every cycle (see src/radar.py) --
+        # those two need their own isolated state files here for the same reason
+        # snapshots does, otherwise every run of this test would write its fixture
+        # data ("GOOD"/"addr-good", etc.) into the real data/opportunity_watchlist.json
+        # and data/news_signals.json on disk.
         self._tmp_dir = tempfile.TemporaryDirectory()
-        tmp_file = Path(self._tmp_dir.name) / "snapshots.json"
-        self._patcher = mock.patch.object(snapshot, "SNAPSHOT_FILE", tmp_file)
-        self._patcher.start()
+        tmp_snapshots = Path(self._tmp_dir.name) / "snapshots.json"
+        tmp_watchlist = Path(self._tmp_dir.name) / "opportunity_watchlist.json"
+        tmp_news = Path(self._tmp_dir.name) / "news_signals.json"
+
+        self._patchers = [
+            mock.patch.object(snapshot, "SNAPSHOT_FILE", tmp_snapshots),
+            mock.patch.object(opportunity_watchlist, "STATE_FILE", tmp_watchlist),
+            mock.patch.object(news_signal_engine, "STATE_FILE", tmp_news),
+        ]
+        for patcher in self._patchers:
+            patcher.start()
 
     def tearDown(self):
-        self._patcher.stop()
+        for patcher in self._patchers:
+            patcher.stop()
         self._tmp_dir.cleanup()
 
     def test_run_radar_end_to_end_with_fixture_data(self):
