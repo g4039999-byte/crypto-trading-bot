@@ -217,13 +217,53 @@ PAPER_ENTRY_TRENDS = tuple(
 # screening as live (src/risk.py, src/jupiter_client.py) untouched.
 PAPER_MIN_LIQUIDITY_USD = _get_float("PAPER_MIN_LIQUIDITY_USD", MIN_LIQUIDITY_USD)
 PAPER_MIN_VOLUME_24H_USD = _get_float("PAPER_MIN_VOLUME_24H_USD", MIN_VOLUME_24H_USD)
-PAPER_MIN_PAIR_AGE_MINUTES = _get_float("PAPER_MIN_PAIR_AGE_MINUTES", MIN_LIVE_PAIR_AGE_MINUTES)
+
+# 15m (was MIN_LIVE_PAIR_AGE_MINUTES=5m): the first paper-trading session
+# (2026-09-03, 20 closed trades under the 5m floor) lost -$21.99 at a 20%
+# win rate. scripts/backtest_paper_strategy.py replayed the same rules
+# against every token this radar has ever recorded (161 tokens/~7000
+# snapshots) and swept the age floor alongside stop/take-profit: entries
+# taken right at the 5m floor were disproportionately losers (early-life
+# pump-then-dump), while the *same* candidates re-evaluated a bit older
+# were consistently better -- PnL turned positive and win rate roughly
+# quadrupled once entries were required to be >=15m old, with results
+# essentially flat between 15-20m. This is a paper-only tuning; live's
+# own MIN_LIVE_PAIR_AGE_MINUTES=5 is untouched.
+PAPER_MIN_PAIR_AGE_MINUTES = _get_float("PAPER_MIN_PAIR_AGE_MINUTES", 15.0)
 PAPER_MAX_PAIR_AGE_MINUTES = _get_float("PAPER_MAX_PAIR_AGE_MINUTES", MAX_LIVE_PAIR_AGE_MINUTES)
 
 # Paper trading may hold more than one position at once (real risk is
 # zero), unlike the live MAX_OPEN_POSITIONS=1 above which is deliberately
 # conservative with real capital.
 PAPER_MAX_OPEN_POSITIONS = _get_int("PAPER_MAX_OPEN_POSITIONS", 3)
+
+# --- Paper-only exit tuning -- kept separate from the shared STOP_LOSS_
+# PCT/TAKE_PROFIT_PCT above so live_trader.py's numbers are never touched
+# by this. Same backtest as above: a tighter take-profit (25% instead of
+# 50%) locks in gains before these thin-liquidity tokens give them back --
+# in the same historical replay, the CURRENT rules (5m floor, 25/50
+# stop/take) produced -$21.99 over 20 trades (20% win rate); the
+# CANDIDATE rules below (15m floor, 25/25 stop/take, the liquidity-
+# drawdown guard and cooldown just below) produced +$8.12 over 7 trades
+# (85.7% win rate) on the exact same data. Stop-loss itself (25%) was
+# NOT the problem -- it already outperformed tighter 15/20% alternatives
+# in the sweep -- so it is carried over unchanged.
+PAPER_STOP_LOSS_PCT = _get_float("PAPER_STOP_LOSS_PCT", 25.0)
+PAPER_TAKE_PROFIT_PCT = _get_float("PAPER_TAKE_PROFIT_PCT", 25.0)
+
+# Reject a candidate whose liquidity has already fallen this much from
+# its own recent peak (across the snapshots the radar has for it so
+# far), even if its current liquidity still clears PAPER_MIN_LIQUIDITY_
+# USD -- a level "still above the floor" can hide a pool actively being
+# drained. Both real closing losses on 2026-09-03 (NEVER, Magachud) had
+# already lost >50% of peak liquidity by the time they were bought.
+PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT = _get_float("PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT", 25.0)
+
+# Do not re-buy a token for this long after a stop-loss on it -- observed
+# live on 2026-09-03: Magachud was stop-lossed, then bought again 5
+# minutes later while still in the same decline, and lost a second time.
+# 0 disables the cooldown.
+PAPER_STOP_LOSS_COOLDOWN_MINUTES = _get_float("PAPER_STOP_LOSS_COOLDOWN_MINUTES", 60.0)
 
 # --- Wallet & RPC -- SOLANA_PRIVATE_KEY must NEVER be committed, logged,
 # printed, or pasted into a chat. It is read from the environment only.

@@ -229,6 +229,44 @@ all (enforced by a regression test), and its state lives in
 `data/paper_positions.json` / `data/paper_trade_log.jsonl` -- files the
 live layer never reads or writes.
 
+### Tuning the strategy from real results, not one or two trades
+
+`scripts/backtest_paper_strategy.py` replays entry/exit rules against
+every token this radar has ever recorded a snapshot for
+(`data/snapshots.json`), using the exact same `src/scoring.py`,
+`src/observation.py` and risk logic the live radar uses -- not a
+hand-copied approximation -- so a candidate rule change can be compared
+against the currently-deployed rules on real historical market data
+before ever being adopted:
+
+```bash
+python -m scripts.backtest_paper_strategy
+```
+
+It is read-only: it never touches `data/paper_positions.json` or
+`data/paper_trade_log.jsonl`. This is how the current defaults were
+chosen: the first live paper-trading session (2026-09-03) closed 3/3
+trades at a loss (-$6.28); the backtest replayed the same rules against
+161 tracked tokens/~7000 snapshots and confirmed it wasn't a fluke --
+20 trades, 20% win rate, -$21.99 total. Both real losers, and the
+sweep's worst-performing region generally, shared the same pattern:
+entries taken right at the age floor of that time (5 minutes, then
+`MIN_LIVE_PAIR_AGE_MINUTES`'s value) were disproportionately early-life
+pump-then-dump losers. Raising `PAPER_MIN_PAIR_AGE_MINUTES` to 15,
+tightening `PAPER_TAKE_PROFIT_PCT` to 25 (from 50), and adding a
+liquidity-drawdown guard (`PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT`) and a
+stop-loss cooldown (`PAPER_STOP_LOSS_COOLDOWN_MINUTES` -- a token isn't
+re-bought right after its own stop-loss just fired) turned the same
+replay into 7 trades, 85.7% win rate, +$8.12 -- only then was it
+deployed. `PAPER_STOP_LOSS_PCT` itself was *not* the problem (it already
+outperformed tighter alternatives in the sweep), so it is unchanged.
+
+Every open/closed position also now records `entry_score`, `entry_
+trend`, `entry_age_minutes`, `discovery_to_entry_seconds` (how long
+between the radar first seeing the token and buying it) and the full
+entry/exit reason text -- shown on the dashboard, and there for the next
+round of this same replay-and-compare process.
+
 ```bash
 python -m src.radar --paper                 # one cycle, paper decisions only
 python -m src.radar --loop --paper           # continuous: radar + paper trading together

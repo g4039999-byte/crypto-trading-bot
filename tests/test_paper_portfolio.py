@@ -22,8 +22,8 @@ class TestPaperPortfolio(unittest.TestCase):
             mock.patch.object(paper_portfolio, "PAPER_MAX_OPEN_POSITIONS", 1),
             mock.patch.object(paper_portfolio, "MAX_DAILY_LOSS_PCT", 20.0),
             mock.patch.object(paper_portfolio, "MAX_CAPITAL_DEPLOYMENT_PCT", 80.0),
-            mock.patch.object(paper_portfolio, "STOP_LOSS_PCT", 25.0),
-            mock.patch.object(paper_portfolio, "TAKE_PROFIT_PCT", 50.0),
+            mock.patch.object(paper_portfolio, "PAPER_STOP_LOSS_PCT", 25.0),
+            mock.patch.object(paper_portfolio, "PAPER_TAKE_PROFIT_PCT", 50.0),
         ]
         for p in self._patches:
             p.start()

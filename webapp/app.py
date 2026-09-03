@@ -260,6 +260,7 @@ _URGENCY_LABELS = {
 _EXIT_REASON_LABELS = {
     "stop_loss": "وقف خسارة",
     "take_profit": "جني أرباح",
+    "max_holding_time": "انتهاء مدة الاحتفاظ",
 }
 
 
@@ -317,6 +318,8 @@ def build_status():
             "size_usd": _fmt_money(p.get("size_usd")),
             "entry_price_usd": p.get("entry_price_usd"),
             "opened_at": p.get("opened_at"),
+            "entry_score": p.get("entry_score"),
+            "entry_trend": p.get("entry_trend"),
         }
         for p in open_positions
     ]
@@ -329,6 +332,8 @@ def build_status():
             "is_win": (t.get("pnl_usd") or 0) > 0,
             "reason": _EXIT_REASON_LABELS.get(t.get("reason"), t.get("reason") or "?"),
             "closed_at": t.get("closed_at"),
+            "entry_score": t.get("entry_score"),
+            "entry_trend": t.get("entry_trend"),
         }
         for t in recent_closed
     ]

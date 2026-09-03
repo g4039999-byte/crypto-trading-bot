@@ -348,7 +348,7 @@ function renderStatus(s) {
   renderList("open-positions-list", "open-positions-empty", s.open_positions, (p) => `
     <div>
       <div class="item-main">${p.symbol}</div>
-      <div class="item-sub">فُتحت: ${fmtTime(p.opened_at)}</div>
+      <div class="item-sub">فُتحت: ${fmtTime(p.opened_at)} · عند الدخول: نقاط ${p.entry_score ?? "—"} · اتجاه ${p.entry_trend ?? "—"}</div>
     </div>
     <div class="pill">حجم الصفقة: ${money(p.size_usd)}</div>
   `);
@@ -356,7 +356,7 @@ function renderStatus(s) {
   renderList("recent-trades-list", "recent-trades-empty", s.recent_trades, (t) => `
     <div>
       <div class="item-main">${t.symbol}</div>
-      <div class="item-sub">${t.reason} · ${fmtTime(t.closed_at)}</div>
+      <div class="item-sub">${t.reason} · ${fmtTime(t.closed_at)} · عند الدخول: نقاط ${t.entry_score ?? "—"} · اتجاه ${t.entry_trend ?? "—"}</div>
     </div>
     <div class="pill" style="color:${t.is_win ? '#1a9c53' : '#d13b3b'}; font-weight:bold;">${money(t.pnl_usd)}</div>
   `);

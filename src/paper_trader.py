@@ -23,15 +23,18 @@ never weakened -- see that function's docstring.
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from src.config import (
     MAX_SLIPPAGE_BPS,
     PAPER_ENTRY_TRENDS,
+    PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT,
     PAPER_MAX_PAIR_AGE_MINUTES,
     PAPER_MIN_LIQUIDITY_USD,
     PAPER_MIN_PAIR_AGE_MINUTES,
     PAPER_MIN_SCORE,
     PAPER_MIN_VOLUME_24H_USD,
+    PAPER_STOP_LOSS_COOLDOWN_MINUTES,
     SELLABILITY_PROBE_SOL,
 )
 from src.jupiter_client import round_trip_check
@@ -45,8 +48,74 @@ from src.paper_portfolio import (
     open_position,
 )
 from src.risk import assess_token_safety
+from src.snapshot import load_snapshots
 
 logger = logging.getLogger(__name__)
+
+
+def _liquidity_drawdown_pct(address, current_liquidity):
+    """% drop from this token's own recent peak liquidity (across every
+    snapshot the radar has recorded for it so far) to its current value.
+    A pool that still clears PAPER_MIN_LIQUIDITY_USD can nonetheless be
+    in the middle of being actively drained -- both real losing paper
+    trades on 2026-09-03 (NEVER, Magachud) had already lost more than
+    half their peak liquidity by the time they were bought; the static
+    floor alone never caught that because what was left still cleared
+    it. See PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT in src/config.py.
+    """
+    if not current_liquidity:
+        return 0.0
+    history = load_snapshots(address)
+    liquidities = [h.get("liquidity_usd") for h in history if h.get("liquidity_usd")]
+    peak = max(liquidities) if liquidities else current_liquidity
+    if not peak:
+        return 0.0
+    return max(0.0, (peak - current_liquidity) / peak * 100)
+
+
+def _discovery_to_entry_seconds(address):
+    """Seconds between the radar's first-ever snapshot of this token and
+    right now (i.e. how long between discovering it and buying it) --
+    one of the fields requested for tracking "was the entry late?".
+    None if there is no history yet (shouldn't happen: risk screening
+    already requires a minimum pair age, which itself requires at least
+    one prior snapshot to have been taken).
+    """
+    history = load_snapshots(address)
+    if not history:
+        return None
+    first_ts = history[0].get("timestamp")
+    if not first_ts:
+        return None
+    try:
+        first_dt = datetime.fromisoformat(first_ts)
+    except (ValueError, TypeError):
+        return None
+    return (datetime.now(timezone.utc) - first_dt).total_seconds()
+
+
+def _recent_stop_loss(state, address):
+    """True if this exact token was closed via stop_loss within the
+    last PAPER_STOP_LOSS_COOLDOWN_MINUTES. Observed live on 2026-09-03:
+    Magachud stopped out, was bought again 5 minutes later while still
+    in the same decline, and lost a second time -- nothing previously
+    stopped the system from re-entering a token immediately after its
+    own stop-loss just fired on it.
+    """
+    if not PAPER_STOP_LOSS_COOLDOWN_MINUTES:
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=PAPER_STOP_LOSS_COOLDOWN_MINUTES)
+    for trade in state.get("closed_trades", []):
+        if trade.get("token_address") != address or trade.get("reason") != "stop_loss":
+            continue
+        closed_at = trade.get("closed_at")
+        try:
+            closed_dt = datetime.fromisoformat(closed_at) if closed_at else None
+        except (ValueError, TypeError):
+            closed_dt = None
+        if closed_dt is not None and closed_dt >= cutoff:
+            return True
+    return False
 
 
 def evaluate_entry(evaluated_pair, probe_check=None):
@@ -65,6 +134,11 @@ def evaluate_entry(evaluated_pair, probe_check=None):
     already_held = any(p.get("token_address") == address for p in state.get("open_positions", []))
     if already_held:
         reason = "already holding an open paper position in this token"
+        log_decision("SKIP", symbol, address, reason)
+        return {"action": "SKIP", "reason": reason, "size_usd": None}
+
+    if _recent_stop_loss(state, address):
+        reason = f"stop-loss cooldown active ({PAPER_STOP_LOSS_COOLDOWN_MINUTES:.0f}m since last stop_loss on this token)"
         log_decision("SKIP", symbol, address, reason)
         return {"action": "SKIP", "reason": reason, "size_usd": None}
 
@@ -91,6 +165,15 @@ def evaluate_entry(evaluated_pair, probe_check=None):
         log_decision("SKIP", symbol, address, reason, extra={"trend": trend})
         return {"action": "SKIP", "reason": reason, "size_usd": None}
 
+    liq_drawdown_pct = _liquidity_drawdown_pct(address, evaluated_pair.get("liquidity"))
+    if liq_drawdown_pct > PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT:
+        reason = (
+            f"liquidity down {liq_drawdown_pct:.0f}% from its recent peak "
+            f"(limit {PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT:.0f}%) -- looks like it's being drained"
+        )
+        log_decision("SKIP", symbol, address, reason, extra={"liquidity_drawdown_pct": round(liq_drawdown_pct, 1)})
+        return {"action": "SKIP", "reason": reason, "size_usd": None}
+
     if probe_check is None:
         probe_lamports = int(SELLABILITY_PROBE_SOL * 1_000_000_000)
         probe_check = round_trip_check(address, probe_lamports, MAX_SLIPPAGE_BPS)
@@ -114,12 +197,25 @@ def evaluate_entry(evaluated_pair, probe_check=None):
         log_decision("SKIP", symbol, address, reason)
         return {"action": "SKIP", "reason": reason, "size_usd": None}
 
-    reason = "passed score/trend/risk/sellability screening (paper)"
+    age_minutes = evaluated_pair.get("age")
+    discovery_to_entry_seconds = _discovery_to_entry_seconds(address)
+
+    reason = (
+        f"score {score}>={PAPER_MIN_SCORE}, trend {trend}, "
+        f"liquidity/volume/age/sellability screening passed (paper)"
+    )
     log_decision(
         "BUY", symbol, address, reason,
-        extra={"score": score, "trend": trend, "size_usd": size_usd},
+        extra={
+            "score": score, "trend": trend, "size_usd": size_usd,
+            "age_minutes": age_minutes, "discovery_to_entry_seconds": discovery_to_entry_seconds,
+        },
     )
-    return {"action": "BUY", "reason": reason, "size_usd": size_usd}
+    return {
+        "action": "BUY", "reason": reason, "size_usd": size_usd,
+        "entry_score": score, "entry_trend": trend, "entry_age_minutes": age_minutes,
+        "discovery_to_entry_seconds": discovery_to_entry_seconds,
+    }
 
 
 def evaluate_exit(position, current_price_usd):
@@ -171,6 +267,13 @@ def run_paper_cycle(evaluated_pairs):
         entry_decision = evaluate_entry(pair)
         decisions.append(entry_decision)
         if entry_decision["action"] == "BUY":
-            open_position(pair["address"], pair["symbol"], pair["price_usd"], entry_decision["size_usd"])
+            open_position(
+                pair["address"], pair["symbol"], pair["price_usd"], entry_decision["size_usd"],
+                entry_score=entry_decision.get("entry_score"),
+                entry_trend=entry_decision.get("entry_trend"),
+                entry_reason=entry_decision.get("reason"),
+                entry_age_minutes=entry_decision.get("entry_age_minutes"),
+                discovery_to_entry_seconds=entry_decision.get("discovery_to_entry_seconds"),
+            )
 
     return decisions

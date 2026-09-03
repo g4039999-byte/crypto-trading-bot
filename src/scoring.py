@@ -3,10 +3,17 @@ import time
 from src.utils import safe_get
 
 
-def calculate_score(pair):
+def calculate_score(pair, age_minutes=None):
     """Score 0-100 based on liquidity, volume, buy pressure, momentum and
     pair age. Defensive against missing/null fields -- returns 0 when
     there isn't enough data (no liquidity or volume figure) to score.
+
+    age_minutes is normally computed from pair["pairCreatedAt"] against
+    the current wall-clock time (the live radar's case). Pass it
+    explicitly to score a *historical* point in time instead -- e.g.
+    scripts/backtest_paper_strategy.py replays old snapshots, where
+    "now" must be the snapshot's own timestamp, not whenever the replay
+    happens to run.
     """
     if not isinstance(pair, dict):
         return 0
@@ -18,10 +25,10 @@ def calculate_score(pair):
     buys = safe_get(pair, "txns", "h24", "buys", default=0) or 0
     sells = safe_get(pair, "txns", "h24", "sells", default=0) or 0
 
-    pair_created = pair.get("pairCreatedAt")
-    age_minutes = None
-    if isinstance(pair_created, (int, float)):
-        age_minutes = (time.time() * 1000 - pair_created) / 60000
+    if age_minutes is None:
+        pair_created = pair.get("pairCreatedAt")
+        if isinstance(pair_created, (int, float)):
+            age_minutes = (time.time() * 1000 - pair_created) / 60000
 
     if liquidity is None or volume is None:
         return 0

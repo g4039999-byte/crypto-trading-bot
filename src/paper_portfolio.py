@@ -4,9 +4,12 @@ This is a deliberate near-duplicate of src/portfolio.py rather than a
 shared module: paper and (eventual) live position state must never be
 able to mix, even by an import mistake, so this file owns its own state
 file (data/paper_positions.json) and never touches
-src/portfolio.py or data/positions.json. It mirrors the same sizing/
-stop-loss/take-profit rules so a paper run is a faithful rehearsal of
-what live trading would do.
+src/portfolio.py or data/positions.json. It mirrors the same *sizing*
+rules as live, but uses its own PAPER_STOP_LOSS_PCT/PAPER_TAKE_PROFIT_PCT
+(see src/config.py for the backtest behind that split) rather than
+live's STOP_LOSS_PCT/TAKE_PROFIT_PCT, so paper can act on real evidence
+about what exit levels work for this asset class without ever touching
+live's numbers.
 """
 
 import json
@@ -20,8 +23,8 @@ from src.config import (
     MAX_HOLDING_MINUTES,
     MAX_TRADE_USD,
     PAPER_MAX_OPEN_POSITIONS,
-    STOP_LOSS_PCT,
-    TAKE_PROFIT_PCT,
+    PAPER_STOP_LOSS_PCT,
+    PAPER_TAKE_PROFIT_PCT,
     TOTAL_CAPITAL_USD,
 )
 
@@ -105,7 +108,19 @@ def compute_position_size_usd(state=None):
     return round(min(MAX_TRADE_USD, remaining_room), 2)
 
 
-def open_position(token_address, symbol, entry_price_usd, size_usd):
+def open_position(
+    token_address, symbol, entry_price_usd, size_usd,
+    *,
+    entry_score=None, entry_trend=None, entry_reason=None,
+    entry_age_minutes=None, discovery_to_entry_seconds=None,
+):
+    """The entry_* / discovery_to_entry_seconds kwargs are optional
+    context recorded onto the position purely for later analysis (shown
+    in the dashboard, and carried through into closed_trades by
+    close_position() below, which spreads every field of the position
+    it closes) -- src/paper_trader.py is what actually computes and
+    passes them; nothing here requires them.
+    """
     if entry_price_usd <= 0:
         raise ValueError("entry_price_usd must be positive")
 
@@ -118,9 +133,14 @@ def open_position(token_address, symbol, entry_price_usd, size_usd):
         "entry_price_usd": entry_price_usd,
         "amount_tokens": amount_tokens,
         "size_usd": size_usd,
-        "stop_loss_price_usd": entry_price_usd * (1 - STOP_LOSS_PCT / 100),
-        "take_profit_price_usd": entry_price_usd * (1 + TAKE_PROFIT_PCT / 100),
+        "stop_loss_price_usd": entry_price_usd * (1 - PAPER_STOP_LOSS_PCT / 100),
+        "take_profit_price_usd": entry_price_usd * (1 + PAPER_TAKE_PROFIT_PCT / 100),
         "opened_at": datetime.now(timezone.utc).isoformat(),
+        "entry_score": entry_score,
+        "entry_trend": entry_trend,
+        "entry_reason": entry_reason,
+        "entry_age_minutes": entry_age_minutes,
+        "discovery_to_entry_seconds": discovery_to_entry_seconds,
     }
 
     state["open_positions"].append(position)
