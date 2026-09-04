@@ -136,6 +136,33 @@ class TestFullBuyThenSellCycle(unittest.TestCase):
         state = paper_portfolio.load_state()
         self.assertEqual(state["open_positions"], [])
 
+    def test_strong_trend_below_the_elevated_score_bar_is_skipped(self):
+        # 2026-09-04: STRONG/RISING need PAPER_ELEVATED_TREND_MIN_SCORE
+        # (55 by default), not just PAPER_MIN_SCORE (40) -- see
+        # src/config.py's PAPER_ELEVATED_TREND_MIN_SCORE docstring for
+        # the backtest evidence. A score of 45 clears PAPER_MIN_SCORE
+        # but not the elevated bar.
+        decisions = paper_trader.run_paper_cycle([make_pair(score=45, trend="STRONG", price_usd=1.00)])
+        self.assertEqual(decisions[-1]["action"], "SKIP")
+        self.assertIn("higher score bar", decisions[-1]["reason"])
+        state = paper_portfolio.load_state()
+        self.assertEqual(state["open_positions"], [])
+
+    def test_rising_trend_below_the_elevated_score_bar_is_skipped(self):
+        decisions = paper_trader.run_paper_cycle([make_pair(score=45, trend="RISING", price_usd=1.00)])
+        self.assertEqual(decisions[-1]["action"], "SKIP")
+        self.assertIn("higher score bar", decisions[-1]["reason"])
+
+    def test_strong_trend_at_or_above_the_elevated_score_bar_still_buys(self):
+        decisions = paper_trader.run_paper_cycle([make_pair(score=55, trend="STRONG", price_usd=1.00)])
+        self.assertEqual(decisions[-1]["action"], "BUY")
+
+    def test_neutral_trend_below_the_elevated_bar_is_unaffected_by_it(self):
+        # NEUTRAL never needs to clear PAPER_ELEVATED_TREND_MIN_SCORE --
+        # only PAPER_MIN_SCORE (40) applies to it, exactly as before.
+        decisions = paper_trader.run_paper_cycle([make_pair(score=45, trend="NEUTRAL", price_usd=1.00)])
+        self.assertEqual(decisions[-1]["action"], "BUY")
+
     def test_still_qualifying_pair_is_not_bought_twice_while_already_held(self):
         # Cycle 1: opens a position. Cycle 2: the exact same pair still
         # qualifies on every score/trend/risk check (nothing about it

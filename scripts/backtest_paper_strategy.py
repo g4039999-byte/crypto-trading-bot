@@ -91,6 +91,18 @@ class Strategy:
     stop_loss_cooldown_minutes: float = 0  # 0 = no cooldown; otherwise, minutes to skip re-entry after a stop_loss on that token
     trailing_arm_pct: float = None  # None/0 = trailing (if enabled) is active from entry; otherwise only arms once price is this many % above entry
     trailing_stop_pct: float = None  # None = trailing stop disabled entirely (exact original behavior); otherwise trail this many % below the peak price seen since entry
+    # --- Entry-momentum-quality controls (2026-09-04) -- all None/False
+    # by default (exact original behavior, unchanged for CURRENT/
+    # CANDIDATE). See scripts/diagnose_paper_strategy.py's finding: the
+    # trend classification (STRONG/RISING/NEUTRAL, a short-term buy-flow
+    # DELTA measure) is fold-consistently profitable for NEUTRAL and
+    # fold-consistently unprofitable for STRONG/RISING -- these fields
+    # let a candidate weight/gate/confirm RISING and STRONG differently
+    # from simply excluding them via entry_trends, without touching
+    # scoring.py/momentum.py's actual point formulas.
+    trend_score_override: dict = None  # e.g. {"RISING": 55, "STRONG": 55} -- a trend key present here must ALSO clear this (higher) min_score, on top of the base min_score check; a "weight reduction" rather than a hard exclusion.
+    max_velocity_pct_per_min: float = None  # None = no cap; otherwise reject entry if price has moved more than this many %/minute since first-seen (a proxy for "already pumped hard/fast -- buying the top" rather than early, sustainable momentum).
+    require_trend_persistence: bool = False  # if True, a STRONG/RISING entry additionally requires the PREVIOUS evaluated point for this token to have ALSO been STRONG/RISING (momentum that has held for at least two consecutive checks, not a single-snapshot spike). NEUTRAL entries are never affected by this.
 
 
 @dataclass
@@ -219,11 +231,22 @@ def _evaluate_point(history, idx):
     }
 
 
-def _passes_entry(evaluated, strategy):
+_ELEVATED_TRENDS = ("STRONG", "RISING")
+
+
+def _passes_entry(evaluated, strategy, previous_evaluated=None):
     if evaluated["score"] < strategy.min_score:
         return False
     if evaluated["trend"] not in strategy.entry_trends:
         return False
+    if strategy.trend_score_override and evaluated["trend"] in strategy.trend_score_override:
+        if evaluated["score"] < strategy.trend_score_override[evaluated["trend"]]:
+            return False
+    if strategy.max_velocity_pct_per_min is not None and evaluated["velocity_pct_per_min"] > strategy.max_velocity_pct_per_min:
+        return False
+    if strategy.require_trend_persistence and evaluated["trend"] in _ELEVATED_TRENDS:
+        if previous_evaluated is None or previous_evaluated["trend"] not in _ELEVATED_TRENDS:
+            return False
     if strategy.max_liq_drawdown_pct is not None and evaluated["liq_drawdown_pct"] > strategy.max_liq_drawdown_pct:
         return False
     risk = assess_token_safety(
@@ -326,7 +349,8 @@ def replay_token(token, history, strategy):
             continue
 
         evaluated = _evaluate_point(history, idx)
-        if _passes_entry(evaluated, strategy):
+        previous_evaluated = _evaluate_point(history, idx - 1) if (strategy.require_trend_persistence and idx >= 2) else None
+        if _passes_entry(evaluated, strategy, previous_evaluated=previous_evaluated):
             discovery_to_entry_s = (ts - _parse_ts(history[0]["timestamp"])).total_seconds()
             in_position = Trade(
                 token=token, entry_idx=idx, entry_ts=ts, entry_price=price,
@@ -542,6 +566,20 @@ CURRENT = Strategy(
     max_liq_drawdown_pct=None, stop_loss_cooldown_minutes=0,
 )
 
+# The entry/exit rule set BEFORE the 2026-09-04 elevated-trend-score
+# change below -- kept as its own object so every single-mechanism
+# ENTRY_FILTER_VARIANT (via _candidate_variant()) is tested against this
+# unchanged baseline, never accidentally stacked on top of a later
+# decision. CANDIDATE itself (below) is what's actually deployed.
+_PRE_ELEVATED_TREND_GATE_BASE = Strategy(
+    name="pre-2026-09-04 baseline (not directly used as a comparison target)",
+    min_score=40, entry_trends=("STRONG", "RISING", "NEUTRAL"),
+    min_liquidity_usd=5000, min_volume_24h_usd=25000,
+    min_age_minutes=15, max_age_minutes=180,
+    stop_loss_pct=25, take_profit_pct=25, max_holding_minutes=240,
+    max_liq_drawdown_pct=40, stop_loss_cooldown_minutes=60,
+)
+
 CANDIDATE = Strategy(
     name="CANDIDATE (deployed, matches src/config.py's PAPER_* defaults)",
     min_score=40, entry_trends=("STRONG", "RISING", "NEUTRAL"),
@@ -549,6 +587,14 @@ CANDIDATE = Strategy(
     min_age_minutes=15, max_age_minutes=180,
     stop_loss_pct=25, take_profit_pct=25, max_holding_minutes=240,
     max_liq_drawdown_pct=40, stop_loss_cooldown_minutes=60,
+    # 2026-09-04: adopted after this exact comparison qualified on
+    # out-of-sample/fold-stability/drawdown evidence -- see
+    # PAPER_ELEVATED_TREND_MIN_SCORE's docstring in src/config.py for the
+    # full evidence trail. Matches ENTRY_SCORE_PENALTY_55 below, kept as
+    # a separate named variant (built off _PRE_ELEVATED_TREND_GATE_BASE,
+    # not this CANDIDATE) so a future re-run still shows the same
+    # apples-to-apples comparison this decision was based on.
+    trend_score_override={"RISING": 55, "STRONG": 55},
 )
 
 # --- Trailing-stop variants (2026-09-04) -- all built on top of
@@ -612,6 +658,78 @@ TRAIL_CAPPED = Strategy(
 TRAILING_VARIANTS = (TRAIL_IMMEDIATE, TRAIL_ARMED_TIGHT, TRAIL_ARMED_WIDE, TRAIL_ARMED_LATE, TRAIL_CAPPED)
 
 
+def _candidate_variant(name, **overrides):
+    """A Strategy identical to _PRE_ELEVATED_TREND_GATE_BASE (CANDIDATE's
+    rules BEFORE the 2026-09-04 elevated-trend-score change) except for
+    the given overrides -- deliberately NOT built from CANDIDATE itself,
+    so a variant testing one mechanism (e.g. a velocity cap) is never
+    silently stacked on top of a different, already-adopted mechanism
+    (the trend_score_override CANDIDATE now carries). Every entry-filter
+    variant below changes ONLY the momentum-quality mechanism being
+    tested, never SL/TP/cooldown/liquidity-drawdown-guard/min_score/
+    min_liquidity/min_volume/age window, per this session's explicit
+    scope.
+    """
+    from dataclasses import replace
+    return replace(_PRE_ELEVATED_TREND_GATE_BASE, name=name, **overrides)
+
+
+# --- Entry-momentum-quality variants (2026-09-04) -- testing WHY the
+# trend-classification gate (entry_trends) lets in RISING/STRONG
+# candidates that scripts/diagnose_paper_strategy.py found are
+# fold-consistently unprofitable, via four DIFFERENT mechanisms (not a
+# blind numeric grid over one mechanism): full exclusion, partial
+# exclusion, a stricter score bar for the elevated trends ("weight
+# reduction"), an additional persistence confirmation, and a velocity
+# cap. All built on CANDIDATE's unchanged SL/TP/cooldown/liquidity-guard/
+# min_score/liquidity/volume/age settings.
+ENTRY_EXCLUDE_ALL_ELEVATED = _candidate_variant(
+    "ENTRY_EXCLUDE_ALL_ELEVATED (NEUTRAL only, drop RISING+STRONG entirely)",
+    entry_trends=("NEUTRAL",),
+)
+
+ENTRY_EXCLUDE_STRONG_ONLY = _candidate_variant(
+    "ENTRY_EXCLUDE_STRONG_ONLY (drop STRONG, keep RISING+NEUTRAL)",
+    entry_trends=("RISING", "NEUTRAL"),
+)
+
+ENTRY_EXCLUDE_RISING_ONLY = _candidate_variant(
+    "ENTRY_EXCLUDE_RISING_ONLY (drop RISING, keep STRONG+NEUTRAL)",
+    entry_trends=("STRONG", "NEUTRAL"),
+)
+
+ENTRY_SCORE_PENALTY_55 = _candidate_variant(
+    "ENTRY_SCORE_PENALTY_55 (RISING/STRONG need score>=55, NEUTRAL keeps 40)",
+    trend_score_override={"RISING": 55, "STRONG": 55},
+)
+
+ENTRY_SCORE_PENALTY_60 = _candidate_variant(
+    "ENTRY_SCORE_PENALTY_60 (RISING/STRONG need score>=60, NEUTRAL keeps 40)",
+    trend_score_override={"RISING": 60, "STRONG": 60},
+)
+
+ENTRY_REQUIRE_PERSISTENCE = _candidate_variant(
+    "ENTRY_REQUIRE_PERSISTENCE (RISING/STRONG must have also been RISING/STRONG one snapshot earlier)",
+    require_trend_persistence=True,
+)
+
+ENTRY_VELOCITY_CAP_3 = _candidate_variant(
+    "ENTRY_VELOCITY_CAP_3 (reject any entry moving >3%/min since first-seen)",
+    max_velocity_pct_per_min=3.0,
+)
+
+ENTRY_VELOCITY_CAP_5 = _candidate_variant(
+    "ENTRY_VELOCITY_CAP_5 (reject any entry moving >5%/min since first-seen)",
+    max_velocity_pct_per_min=5.0,
+)
+
+ENTRY_FILTER_VARIANTS = (
+    ENTRY_EXCLUDE_ALL_ELEVATED, ENTRY_EXCLUDE_STRONG_ONLY, ENTRY_EXCLUDE_RISING_ONLY,
+    ENTRY_SCORE_PENALTY_55, ENTRY_SCORE_PENALTY_60, ENTRY_REQUIRE_PERSISTENCE,
+    ENTRY_VELOCITY_CAP_3, ENTRY_VELOCITY_CAP_5,
+)
+
+
 N_FOLDS = 4  # walk-forward folds -- kept smaller than the stocks side's 5 given ~4.6 days of data vs stocks' 10 years; see fold_stability_score's docstring
 MIN_TRADES_FOR_SIGNIFICANCE = 30  # a strategy with fewer trades than this in a bucket is not judged on that bucket
 
@@ -628,7 +746,86 @@ def full_report(strategy, snapshots, cutoff_ts, fold_boundaries, verbose=False):
     trades = run_backtest(strategy, snapshots)
     summary = summarize_with_oos(strategy.name, trades, cutoff_ts, verbose=verbose)
     summary["fold_stability"] = fold_stability_score(trades, fold_boundaries)
+    summary["_trades"] = trades  # kept for sub-metric breakdowns below; never printed directly
     return summary
+
+
+def qualifies(report, baseline):
+    """Shared bar for adopting ANY variant (trailing-stop or entry-
+    filter): must beat the baseline on out-of-sample expectancy, have an
+    out-of-sample sample large enough to say anything at all, match or
+    beat the baseline's fold_stability, and not blow out max drawdown --
+    never a decision made on in-sample numbers alone. Returns a list of
+    failure reasons (empty = qualifies).
+    """
+    oos = report["out_of_sample"]
+    reasons_failed = []
+    if oos["n"] < max(5, MIN_TRADES_FOR_SIGNIFICANCE // 4):
+        reasons_failed.append(f"out-of-sample trade count too small ({oos['n']})")
+    if oos["expectancy"] <= baseline["out_of_sample"]["expectancy"]:
+        reasons_failed.append("out-of-sample expectancy does not beat the baseline")
+    if report["fold_stability"] < baseline["fold_stability"]:
+        reasons_failed.append(f"fold_stability {report['fold_stability']} < baseline's {baseline['fold_stability']}")
+    if (report["max_drawdown_pct"] or 0) > (baseline["max_drawdown_pct"] or 0) * 1.5:
+        reasons_failed.append("max drawdown meaningfully worse than the baseline")
+    return reasons_failed
+
+
+def sub_metric_row(label, trades, predicate):
+    subset = [t for t in trades if predicate(t)]
+    m = compute_metrics([t.pnl_pct for t in subset])
+    pf = "inf" if m["profit_factor"] == float("inf") else ("n/a" if m["profit_factor"] is None else f"{m['profit_factor']:.2f}")
+    win = "n/a" if m["win_rate_pct"] is None else f"{m['win_rate_pct']}%"
+    exp = "n/a" if m["expectancy_pct"] is None else f"{m['expectancy_pct']:+.2f}%"
+    return f"    {label:<16} n={m['trade_count']:>4}  win_rate={win:>6}  PF={pf:>5}  expectancy={exp:>8}"
+
+
+def compare_group(group_label, baseline, variants, snapshots, cutoff_ts, fold_boundaries, *, report_rising_strong_velocity=False):
+    """Runs, reports, and applies qualifies() to one named group of
+    variants against `baseline`. Returns the sorted list of qualifying
+    (strategy, report) pairs, best first (empty if none qualify).
+    """
+    print(f"\n\n######## {group_label} ########")
+    baseline_report = full_report(baseline, snapshots, cutoff_ts, fold_boundaries)
+    print(f"Baseline ({baseline.name}): {_row('', baseline_report)}  fold_stability={baseline_report['fold_stability']}")
+
+    qualifying = []
+    for s in variants:
+        r = full_report(s, snapshots, cutoff_ts, fold_boundaries)
+        print(f"\n{s.name}")
+        print("  " + _row("full", r))
+        print("  " + _row("in-sample", r["in_sample"]))
+        print("  " + _row("out-of-sample", r["out_of_sample"]))
+        print(f"  fold_stability={r['fold_stability']}")
+
+        if report_rising_strong_velocity:
+            trades = r["_trades"]
+            print(sub_metric_row("RISING trend", trades, lambda t: t.entry_trend == "RISING"))
+            print(sub_metric_row("STRONG trend", trades, lambda t: t.entry_trend == "STRONG"))
+            print(sub_metric_row("NEUTRAL trend", trades, lambda t: t.entry_trend == "NEUTRAL"))
+            velocities = sorted(t.entry_velocity_pct_per_min for t in trades if t.entry_velocity_pct_per_min is not None)
+            if len(velocities) >= 6:
+                high_cut = velocities[2 * len(velocities) // 3]
+                print(sub_metric_row("high-velocity third", trades, lambda t, c=high_cut: (t.entry_velocity_pct_per_min or 0) >= c))
+
+        reasons_failed = qualifies(r, baseline_report)
+        status = "QUALIFIES" if not reasons_failed else "does not qualify: " + "; ".join(reasons_failed)
+        print(f"  -> {status}")
+        if not reasons_failed:
+            qualifying.append((s, r))
+
+    qualifying.sort(key=lambda sr: (sr[1]["fold_stability"], sr[1]["out_of_sample"]["expectancy"]), reverse=True)
+    if not qualifying:
+        print(f"\nNo {group_label} variant beat CANDIDATE convincingly on out-of-sample evidence. Keeping CANDIDATE unchanged.")
+    else:
+        winner, _ = qualifying[0]
+        print(f"\nBest qualifying {group_label} variant: {winner.name}")
+        print("Cross-check: split by coin group (item 8) --")
+        for i, group in enumerate(split_tokens_into_groups(snapshots, n_groups=2)):
+            group_trades = run_backtest(winner, group)
+            group_summary = summarize(f"group {i}", group_trades, verbose=False)
+            print(f"  group {i}: n={group_summary['n']} expectancy=${group_summary['expectancy']:+.3f}/trade PF={group_summary['profit_factor']}")
+    return qualifying
 
 
 def main():
@@ -642,62 +839,17 @@ def main():
     print(f"Out-of-sample cutoff (70% in-sample / 30% out-of-sample by time): {cutoff_ts.isoformat()}")
     print(f"Walk-forward folds: {N_FOLDS} (boundaries: {[b.isoformat() for b in fold_boundaries]})")
 
-    all_strategies = (CURRENT, CANDIDATE) + TRAILING_VARIANTS
-    results = {s.name: full_report(s, snapshots, cutoff_ts, fold_boundaries) for s in all_strategies}
-
-    print("\n=== Full comparison (baseline first, then every trailing-stop variant) ===")
-    for s in all_strategies:
-        r = results[s.name]
-        print(f"\n{s.name}")
-        print("  " + _row("full", r))
-        print("  " + _row("in-sample", r["in_sample"]))
-        print("  " + _row("out-of-sample", r["out_of_sample"]))
-        print(f"  fold_stability={r['fold_stability']} (fraction of {N_FOLDS} walk-forward folds with positive expectancy AND profit_factor>1)")
-
-    # --- Verdict: only ever consider a trailing variant a genuine win if
-    # it beats CANDIDATE on OUT-OF-SAMPLE expectancy, has an
-    # out-of-sample sample large enough to say anything at all, has a
-    # fold_stability at least as good as CANDIDATE's own, and does not
-    # blow out max drawdown -- exactly what was asked: never pick a
-    # winner on in-sample numbers alone.
-    cand = results[CANDIDATE.name]
-    print("\n=== Verdict ===")
-    print(f"Baseline CANDIDATE: {_row('', cand)}  fold_stability={cand['fold_stability']}")
-
-    qualifying = []
-    for s in TRAILING_VARIANTS:
-        r = results[s.name]
-        oos = r["out_of_sample"]
-        reasons_failed = []
-        if oos["n"] < max(5, MIN_TRADES_FOR_SIGNIFICANCE // 4):
-            reasons_failed.append(f"out-of-sample trade count too small ({oos['n']})")
-        if oos["expectancy"] <= cand["out_of_sample"]["expectancy"]:
-            reasons_failed.append("out-of-sample expectancy does not beat CANDIDATE")
-        if r["fold_stability"] < cand["fold_stability"]:
-            reasons_failed.append(f"fold_stability {r['fold_stability']} < CANDIDATE's {cand['fold_stability']}")
-        if (r["max_drawdown_pct"] or 0) > (cand["max_drawdown_pct"] or 0) * 1.5:
-            reasons_failed.append("max drawdown meaningfully worse than CANDIDATE")
-
-        status = "QUALIFIES" if not reasons_failed else "does not qualify: " + "; ".join(reasons_failed)
-        print(f"{s.name}: {status}")
-        if not reasons_failed:
-            qualifying.append((s, r))
-
-    if not qualifying:
-        print("\nNo trailing-stop variant beat CANDIDATE convincingly on out-of-sample evidence. Keeping CANDIDATE unchanged.")
-        return
-
-    qualifying.sort(key=lambda sr: (sr[1]["fold_stability"], sr[1]["out_of_sample"]["expectancy"]), reverse=True)
-    winner, winner_report = qualifying[0]
-    print(f"\nBest qualifying trailing-stop variant: {winner.name}")
-
-    # Item 8: also check the winner's edge holds across more than one
-    # arbitrary slice of the coin universe, not just the combined run.
-    print("\n=== Cross-check: split by coin group (item 8) ===")
-    for i, group in enumerate(split_tokens_into_groups(snapshots, n_groups=2)):
-        group_trades = run_backtest(winner, group)
-        group_summary = summarize(f"group {i}", group_trades, verbose=False)
-        print(f"group {i}: n={group_summary['n']} expectancy=${group_summary['expectancy']:+.3f}/trade PF={group_summary['profit_factor']}")
+    compare_group("TRAILING-STOP VARIANTS", CANDIDATE, TRAILING_VARIANTS, snapshots, cutoff_ts, fold_boundaries)
+    # Compared against _PRE_ELEVATED_TREND_GATE_BASE (CANDIDATE's rules
+    # BEFORE this session's adopted change), not the current CANDIDATE --
+    # CANDIDATE now already includes ENTRY_SCORE_PENALTY_55's change, so
+    # comparing these variants against it would compare that winner
+    # against an identical copy of itself. This reproduces the exact
+    # historical comparison the 2026-09-04 decision was based on.
+    compare_group(
+        "ENTRY-MOMENTUM-QUALITY VARIANTS", _PRE_ELEVATED_TREND_GATE_BASE, ENTRY_FILTER_VARIANTS,
+        snapshots, cutoff_ts, fold_boundaries, report_rising_strong_velocity=True,
+    )
 
 
 if __name__ == "__main__":

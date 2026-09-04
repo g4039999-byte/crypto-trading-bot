@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.config import (
     MAX_SLIPPAGE_BPS,
+    PAPER_ELEVATED_TREND_MIN_SCORE,
     PAPER_ENTRY_TRENDS,
     PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT,
     PAPER_MAX_PAIR_AGE_MINUTES,
@@ -52,6 +53,12 @@ from src.snapshot import load_snapshots
 from src import x_intelligence
 
 logger = logging.getLogger(__name__)
+
+# trend values src.observation.compute_trend derives from short-term
+# buy-FLOW delta (not the same as calculate_score's cumulative
+# buy_ratio) -- see PAPER_ELEVATED_TREND_MIN_SCORE's docstring in
+# src/config.py for why these two specifically need a higher score bar.
+_ELEVATED_TRENDS = ("STRONG", "RISING")
 
 
 def _liquidity_drawdown_pct(address, current_liquidity):
@@ -166,6 +173,14 @@ def evaluate_entry(evaluated_pair, probe_check=None):
         log_decision("SKIP", symbol, address, reason, extra={"trend": trend})
         return {"action": "SKIP", "reason": reason, "size_usd": None}
 
+    if trend in _ELEVATED_TRENDS and score < PAPER_ELEVATED_TREND_MIN_SCORE:
+        reason = (
+            f"trend '{trend}' requires the higher score bar {PAPER_ELEVATED_TREND_MIN_SCORE} "
+            f"(has {score}) -- see PAPER_ELEVATED_TREND_MIN_SCORE in src/config.py"
+        )
+        log_decision("SKIP", symbol, address, reason, extra={"score": score, "trend": trend})
+        return {"action": "SKIP", "reason": reason, "size_usd": None}
+
     liq_drawdown_pct = _liquidity_drawdown_pct(address, evaluated_pair.get("liquidity"))
     if liq_drawdown_pct > PAPER_MAX_LIQUIDITY_DRAWDOWN_PCT:
         reason = (
@@ -249,6 +264,8 @@ def _skip_reason_bucket(reason):
         return "no_price"
     if "below paper minimum" in reason:
         return "score_too_low"
+    if "requires the higher score bar" in reason:
+        return "elevated_trend_needs_higher_score"
     if reason.startswith("trend "):
         return "trend_not_acceptable"
     if "drained" in reason:

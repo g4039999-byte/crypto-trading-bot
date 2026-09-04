@@ -13,6 +13,7 @@ from scripts.backtest_paper_strategy import (
     Strategy,
     Trade,
     _check_exit,
+    _passes_entry,
     _update_trailing_stop,
     assign_fold_index,
     compute_fold_boundaries,
@@ -139,6 +140,91 @@ def _trailing_strategy(**overrides):
     )
     base.update(overrides)
     return Strategy(**base)
+
+
+def _entry_strategy(**overrides):
+    base = dict(
+        name="test-entry", min_score=40, entry_trends=("STRONG", "RISING", "NEUTRAL"),
+        min_liquidity_usd=5000, min_volume_24h_usd=25000,
+        min_age_minutes=15, max_age_minutes=180,
+        stop_loss_pct=25, take_profit_pct=25, max_holding_minutes=240,
+        max_liq_drawdown_pct=40, stop_loss_cooldown_minutes=60,
+    )
+    base.update(overrides)
+    return Strategy(**base)
+
+
+def _evaluated(**overrides):
+    base = dict(
+        score=60, trend="STRONG", liquidity=20000, volume=60000, age=20.0,
+        buys=100, sells=50, price_usd=1.0, liq_drawdown_pct=0.0,
+        velocity_pct_per_min=0.5,
+    )
+    base.update(overrides)
+    return base
+
+
+class TestPassesEntryWithTrendScoreOverride(unittest.TestCase):
+    def test_neutral_is_unaffected_by_an_override_that_does_not_name_it(self):
+        strategy = _entry_strategy(trend_score_override={"RISING": 55, "STRONG": 55})
+        evaluated = _evaluated(trend="NEUTRAL", score=45)
+        self.assertTrue(_passes_entry(evaluated, strategy))
+
+    def test_strong_below_the_override_bar_is_rejected_even_though_it_clears_min_score(self):
+        strategy = _entry_strategy(min_score=40, trend_score_override={"STRONG": 55})
+        evaluated = _evaluated(trend="STRONG", score=45)  # clears min_score=40, not the override=55
+        self.assertFalse(_passes_entry(evaluated, strategy))
+
+    def test_strong_at_or_above_the_override_bar_is_accepted(self):
+        strategy = _entry_strategy(trend_score_override={"STRONG": 55})
+        evaluated = _evaluated(trend="STRONG", score=55)
+        self.assertTrue(_passes_entry(evaluated, strategy))
+
+    def test_no_override_at_all_means_only_min_score_applies(self):
+        strategy = _entry_strategy(min_score=40, trend_score_override=None)
+        evaluated = _evaluated(trend="STRONG", score=45)
+        self.assertTrue(_passes_entry(evaluated, strategy))
+
+
+class TestPassesEntryWithVelocityCap(unittest.TestCase):
+    def test_rejected_when_velocity_exceeds_the_cap(self):
+        strategy = _entry_strategy(max_velocity_pct_per_min=3.0)
+        evaluated = _evaluated(velocity_pct_per_min=5.0)
+        self.assertFalse(_passes_entry(evaluated, strategy))
+
+    def test_accepted_when_velocity_is_at_or_below_the_cap(self):
+        strategy = _entry_strategy(max_velocity_pct_per_min=3.0)
+        evaluated = _evaluated(velocity_pct_per_min=3.0)
+        self.assertTrue(_passes_entry(evaluated, strategy))
+
+    def test_no_cap_means_any_velocity_is_accepted(self):
+        strategy = _entry_strategy(max_velocity_pct_per_min=None)
+        evaluated = _evaluated(velocity_pct_per_min=999.0)
+        self.assertTrue(_passes_entry(evaluated, strategy))
+
+
+class TestPassesEntryWithTrendPersistence(unittest.TestCase):
+    def test_strong_rejected_with_no_previous_evaluated_point_at_all(self):
+        strategy = _entry_strategy(require_trend_persistence=True)
+        evaluated = _evaluated(trend="STRONG")
+        self.assertFalse(_passes_entry(evaluated, strategy, previous_evaluated=None))
+
+    def test_strong_rejected_when_the_previous_point_was_not_elevated(self):
+        strategy = _entry_strategy(require_trend_persistence=True)
+        evaluated = _evaluated(trend="STRONG")
+        previous = _evaluated(trend="NEUTRAL")
+        self.assertFalse(_passes_entry(evaluated, strategy, previous_evaluated=previous))
+
+    def test_strong_accepted_when_the_previous_point_was_also_elevated(self):
+        strategy = _entry_strategy(require_trend_persistence=True)
+        evaluated = _evaluated(trend="STRONG")
+        previous = _evaluated(trend="RISING")  # elevated, doesn't need to be the exact same label
+        self.assertTrue(_passes_entry(evaluated, strategy, previous_evaluated=previous))
+
+    def test_neutral_is_never_affected_by_the_persistence_requirement(self):
+        strategy = _entry_strategy(require_trend_persistence=True)
+        evaluated = _evaluated(trend="NEUTRAL")
+        self.assertTrue(_passes_entry(evaluated, strategy, previous_evaluated=None))
 
 
 class TestUpdateTrailingStop(unittest.TestCase):

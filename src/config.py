@@ -227,6 +227,30 @@ PAPER_ENTRY_TRENDS = tuple(
     t.strip() for t in os.getenv("PAPER_ENTRY_TRENDS", "STRONG,RISING,NEUTRAL").split(",") if t.strip()
 )
 
+# 2026-09-04: scripts/diagnose_paper_strategy.py found -- checked against
+# all 4 walk-forward folds, not just the aggregate -- that RISING/STRONG
+# trend entries (src.observation.compute_trend's classification, a
+# short-term buy-FLOW *delta* between consecutive snapshots) are
+# fold-consistently unprofitable while NEUTRAL is fold-consistently
+# profitable/flat, i.e. this signal tends to buy a token right after it
+# has already spiked rather than catching sustainable early momentum.
+# scripts/backtest_paper_strategy.py then tested 8 different mechanisms
+# (full/partial exclusion, this stricter score bar, a persistence
+# confirmation, two velocity caps) against real historical data with the
+# same out-of-sample/walk-forward-fold/coin-group discipline; this one
+# ("weight reduction" rather than deleting RISING/STRONG outright) was
+# the only one that improved EVERY axis simultaneously vs the deployed
+# baseline -- full-dataset profit_factor 0.72->0.84, max drawdown
+# 1071->672pp, out-of-sample profit_factor 1.44->3.27, out-of-sample
+# expectancy +7.83%->+20.97%, fold_stability 0.25->0.5 (n=113/7 full/OOS
+# trades -- still a small sample; keep re-validating as more radar data
+# accumulates). RISING itself stayed weak even at the higher bar (this
+# raises it, doesn't fully fix it -- see the module docstring notes in
+# backtest_paper_strategy.py); STRONG improved meaningfully. PAPER_MIN_SCORE
+# above is UNCHANGED (still 40, still applies to NEUTRAL) -- this is an
+# ADDITIONAL, higher bar that only RISING/STRONG entries must also clear.
+PAPER_ELEVATED_TREND_MIN_SCORE = _get_int("PAPER_ELEVATED_TREND_MIN_SCORE", 55)
+
 # Liquidity/volume/age safety floors for paper trades -- reuses the
 # general radar filter's liquidity/volume bar (MIN_LIQUIDITY_USD /
 # MIN_VOLUME_24H_USD above: "worth looking at" at all) rather than the
