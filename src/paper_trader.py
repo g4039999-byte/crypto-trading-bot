@@ -40,6 +40,7 @@ from src.config import (
     PAPER_VELOCITY_SPIKE_THRESHOLD_PCT_PER_MIN,
     SELLABILITY_PROBE_SOL,
 )
+from src.dex_client import fetch_pairs
 from src.jupiter_client import round_trip_check
 from src.paper_logger import log_decision
 from src.paper_portfolio import (
@@ -52,6 +53,7 @@ from src.paper_portfolio import (
 )
 from src.risk import assess_token_safety
 from src.snapshot import load_snapshots
+from src.utils import safe_get
 from src import x_intelligence
 
 logger = logging.getLogger(__name__)
@@ -379,6 +381,71 @@ def _record_x_learning_outcome(close_result):
         logger.exception("Failed to record X learning outcome for entity %r -- non-fatal", entity)
 
 
+def _fill_missing_prices_for_open_positions(current_prices, open_positions):
+    """Any open position whose token did NOT come back in this cycle's
+    evaluated_pairs is looked up directly here, so its exit check is
+    never silently skipped.
+
+    2026-09-04, found live: src.snapshot.known_addresses() (the
+    "watchlist" radar.py re-queries every cycle, on top of whatever
+    DexScreener's "latest profiles" feed returns fresh) ranks addresses
+    by most-recently-SNAPSHOTTED first and caps at RADAR_WATCHLIST_SIZE.
+    A token whose pool DexScreener stops returning fresh data for (thin
+    liquidity, migrated, delisted, or just temporarily flaky) stops
+    getting new snapshots, so its rank keeps falling as other tokens get
+    fresher snapshots -- eventually it ages out of the watchlist and is
+    never queried again at all. Before this fix, that meant an open
+    paper position on that token could never be price-checked again,
+    ever -- not stop_loss, not take_profit, not even max_holding_time,
+    since every one of those exit checks requires a fresh price this
+    cycle. Observed live: a real position stuck open 17+ hours, more
+    than 4x MAX_HOLDING_MINUTES, silently un-monitored the entire time.
+
+    This makes one extra, targeted fetch_pairs() call (best-effort,
+    never raises) for just the addresses still missing a price after the
+    normal scan, so an open position can only ever go one cycle without
+    a fresh price, not forever.
+    """
+    missing_addresses = [
+        p["token_address"] for p in open_positions
+        if p.get("token_address") and p["token_address"] not in current_prices
+    ]
+    if not missing_addresses:
+        return current_prices
+
+    logger.warning(
+        "%s open paper position(s) missing a fresh price this cycle -- fetching directly "
+        "so their exit check is never silently skipped: %s",
+        len(missing_addresses), missing_addresses,
+    )
+    try:
+        pairs = fetch_pairs(missing_addresses)
+    except Exception:
+        logger.exception("Fallback price fetch for stranded open position(s) failed -- will retry next cycle")
+        return current_prices
+
+    updated = dict(current_prices)
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+        address = safe_get(pair, "baseToken", "address")
+        price_raw = pair.get("priceUsd")
+        if not address or price_raw is None:
+            continue
+        try:
+            price = float(price_raw)
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            updated[address] = price
+
+    still_missing = [a for a in missing_addresses if a not in updated]
+    if still_missing:
+        logger.warning("Fallback fetch still returned no usable price for: %s", still_missing)
+
+    return updated
+
+
 def run_paper_cycle(evaluated_pairs):
     """One pass over the radar's results: check every open paper position
     for an exit (using each pair's current price_usd when available),
@@ -402,11 +469,16 @@ def run_paper_cycle(evaluated_pairs):
     current_prices = {p["address"]: p["price_usd"] for p in evaluated_pairs if p.get("price_usd")}
 
     state = load_state()
+    current_prices = _fill_missing_prices_for_open_positions(current_prices, state.get("open_positions", []))
     closed_this_cycle = set()
     for position in list(state.get("open_positions", [])):
         price = current_prices.get(position["token_address"])
         if price is None:
-            logger.debug("No current price for open paper position %s this cycle -- skipping exit check", position["symbol"])
+            logger.warning(
+                "No current price for open paper position %s (%s) this cycle even after the direct fallback fetch "
+                "-- exit check skipped again; see _fill_missing_prices_for_open_positions()'s docstring",
+                position["symbol"], position["token_address"],
+            )
             continue
         exit_decision = evaluate_exit(position, price)
         decisions.append(exit_decision)

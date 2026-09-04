@@ -394,6 +394,91 @@ class TestFullBuyThenSellCycle(unittest.TestCase):
         self.assertEqual(state["open_positions"], [])
         self.assertEqual(len(state["closed_trades"]), 1)
 
+    def test_a_position_whose_token_drops_out_of_this_cycles_scan_still_gets_exit_checked(self):
+        # 2026-09-04, found live: a token that ages out of src.snapshot.
+        # known_addresses()'s watchlist (ranked by most-recently-
+        # snapshotted, capped at RADAR_WATCHLIST_SIZE) stops appearing in
+        # evaluated_pairs at all -- before the fallback fetch, that meant
+        # its open position could NEVER be exit-checked again, not even
+        # via max_holding_time (observed stuck open 17+ hours, 4x past
+        # the default). This is the regression test for that fix.
+        paper_trader.run_paper_cycle([make_pair(price_usd=1.00, address="addr-1")])  # cycle 1: buy
+        self.assertEqual(len(paper_portfolio.load_state()["open_positions"]), 1)
+
+        # Cycle 2: this token is NOT in evaluated_pairs at all (some
+        # unrelated token is) -- simulates it having aged out of the
+        # radar's watchlist. The fallback fetch must be tried, and if it
+        # returns a price past the take-profit level, the position must
+        # still close.
+        fallback_pair = {
+            "baseToken": {"address": "addr-1", "symbol": "GOOD"},
+            "priceUsd": "1.60",
+        }
+        with mock.patch.object(paper_trader, "fetch_pairs", return_value=[fallback_pair]) as mocked_fetch:
+            decisions = paper_trader.run_paper_cycle([make_pair(price_usd=1.00, address="addr-other", symbol="OTHER")])
+
+        mocked_fetch.assert_called_once_with(["addr-1"])
+        sell_decisions = [d for d in decisions if d["action"] == "SELL"]
+        self.assertEqual(len(sell_decisions), 1)
+        self.assertEqual(sell_decisions[0]["reason"], "take_profit")
+        # addr-1 is gone (sold via the fallback price); addr-other is a
+        # legitimate, unrelated fresh buy this same cycle -- not evidence
+        # the fix failed to work.
+        state = paper_portfolio.load_state()
+        open_addresses = {p["token_address"] for p in state["open_positions"]}
+        self.assertNotIn("addr-1", open_addresses)
+
+    def test_fallback_fetch_failure_is_non_fatal_and_the_position_stays_open_for_next_cycle(self):
+        paper_trader.run_paper_cycle([make_pair(price_usd=1.00, address="addr-1")])
+
+        with mock.patch.object(paper_trader, "fetch_pairs", side_effect=RuntimeError("DexScreener is down")):
+            decisions = paper_trader.run_paper_cycle([make_pair(price_usd=1.00, address="addr-other", symbol="OTHER")])
+
+        sell_decisions = [d for d in decisions if d["action"] == "SELL"]
+        self.assertEqual(sell_decisions, [])
+        state = paper_portfolio.load_state()
+        open_addresses = {p["token_address"] for p in state["open_positions"]}
+        self.assertIn("addr-1", open_addresses)  # still open -- will retry next cycle, not lost
+
+
+class TestFillMissingPricesForOpenPositions(unittest.TestCase):
+    def test_returns_unchanged_when_nothing_is_missing(self):
+        current_prices = {"addr-1": 1.0}
+        open_positions = [{"token_address": "addr-1"}]
+        with mock.patch.object(paper_trader, "fetch_pairs") as mocked_fetch:
+            result = paper_trader._fill_missing_prices_for_open_positions(current_prices, open_positions)
+        mocked_fetch.assert_not_called()
+        self.assertEqual(result, current_prices)
+
+    def test_fetches_only_the_missing_addresses(self):
+        current_prices = {"addr-1": 1.0}
+        open_positions = [{"token_address": "addr-1"}, {"token_address": "addr-2"}]
+        with mock.patch.object(paper_trader, "fetch_pairs", return_value=[]) as mocked_fetch:
+            paper_trader._fill_missing_prices_for_open_positions(current_prices, open_positions)
+        mocked_fetch.assert_called_once_with(["addr-2"])
+
+    def test_extracts_and_merges_a_usable_price(self):
+        current_prices = {}
+        open_positions = [{"token_address": "addr-2"}]
+        pair = {"baseToken": {"address": "addr-2"}, "priceUsd": "2.50"}
+        with mock.patch.object(paper_trader, "fetch_pairs", return_value=[pair]):
+            result = paper_trader._fill_missing_prices_for_open_positions(current_prices, open_positions)
+        self.assertEqual(result["addr-2"], 2.50)
+
+    def test_a_malformed_returned_pair_is_skipped_not_a_crash(self):
+        current_prices = {}
+        open_positions = [{"token_address": "addr-2"}]
+        with mock.patch.object(paper_trader, "fetch_pairs", return_value=[{"unexpected": "shape"}, None, "not even a dict"]):
+            result = paper_trader._fill_missing_prices_for_open_positions(current_prices, open_positions)
+        self.assertNotIn("addr-2", result)
+
+    def test_network_failure_returns_the_original_prices_unchanged(self):
+        current_prices = {"addr-1": 1.0}
+        open_positions = [{"token_address": "addr-1"}, {"token_address": "addr-2"}]
+        with mock.patch.object(paper_trader, "fetch_pairs", side_effect=RuntimeError("down")):
+            result = paper_trader._fill_missing_prices_for_open_positions(current_prices, open_positions)
+        self.assertEqual(result, current_prices)
+
 
 if __name__ == "__main__":
     unittest.main()
