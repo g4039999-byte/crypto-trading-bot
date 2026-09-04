@@ -7,11 +7,19 @@ state file -- every test builds its own tiny, synthetic Trade list.
 """
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from scripts.backtest_paper_strategy import (
+    Strategy,
     Trade,
+    _check_exit,
+    _update_trailing_stop,
+    assign_fold_index,
+    compute_fold_boundaries,
     compute_oos_cutoff,
+    fold_stability_score,
+    replay_token,
+    split_tokens_into_groups,
     split_trades_by_cutoff,
     summarize,
     summarize_with_oos,
@@ -118,6 +126,158 @@ class TestSummarizeWithOos(unittest.TestCase):
         self.assertEqual(result["n"], 0)
         self.assertEqual(result["in_sample"]["n"], 0)
         self.assertEqual(result["out_of_sample"]["n"], 0)
+
+
+def _trailing_strategy(**overrides):
+    base = dict(
+        name="test-trail", min_score=40, entry_trends=("STRONG", "RISING", "NEUTRAL"),
+        min_liquidity_usd=5000, min_volume_24h_usd=25000,
+        min_age_minutes=15, max_age_minutes=180,
+        stop_loss_pct=25, take_profit_pct=None, max_holding_minutes=240,
+        max_liq_drawdown_pct=40, stop_loss_cooldown_minutes=60,
+        trailing_arm_pct=15, trailing_stop_pct=10,
+    )
+    base.update(overrides)
+    return Strategy(**base)
+
+
+class TestUpdateTrailingStop(unittest.TestCase):
+    def test_disabled_when_trailing_stop_pct_is_none(self):
+        strategy = _trailing_strategy(trailing_stop_pct=None)
+        result = _update_trailing_stop(strategy, entry_price=100.0, peak_price=200.0, existing_trailing_stop=None)
+        self.assertIsNone(result)
+
+    def test_not_armed_until_peak_reaches_the_arm_level(self):
+        strategy = _trailing_strategy(trailing_arm_pct=15, trailing_stop_pct=10)
+        result = _update_trailing_stop(strategy, entry_price=100.0, peak_price=110.0, existing_trailing_stop=None)
+        self.assertIsNone(result)  # only +10% above entry, arm level is +15%
+
+    def test_arms_and_computes_the_trail_level_once_peak_clears_the_arm_level(self):
+        strategy = _trailing_strategy(trailing_arm_pct=15, trailing_stop_pct=10)
+        result = _update_trailing_stop(strategy, entry_price=100.0, peak_price=120.0, existing_trailing_stop=None)
+        self.assertAlmostEqual(result, 120.0 * 0.90)
+
+    def test_zero_arm_pct_means_armed_immediately_from_entry(self):
+        strategy = _trailing_strategy(trailing_arm_pct=0, trailing_stop_pct=15)
+        result = _update_trailing_stop(strategy, entry_price=100.0, peak_price=100.0, existing_trailing_stop=None)
+        self.assertAlmostEqual(result, 85.0)
+
+    def test_only_ever_ratchets_up_never_down(self):
+        strategy = _trailing_strategy(trailing_arm_pct=15, trailing_stop_pct=10)
+        armed_high = _update_trailing_stop(strategy, entry_price=100.0, peak_price=150.0, existing_trailing_stop=None)
+        # price pulls back from its peak -- the trail must not follow it down
+        result = _update_trailing_stop(strategy, entry_price=100.0, peak_price=130.0, existing_trailing_stop=armed_high)
+        self.assertEqual(result, armed_high)
+
+
+class TestCheckExitWithTrailing(unittest.TestCase):
+    def test_hard_stop_loss_fires_even_with_an_armed_trailing_stop(self):
+        # a crash straight through both levels at once -- the hard floor
+        # must still be respected, never loosened by trailing having armed.
+        reason = _check_exit(100.0, _ts_now(), 70.0, _ts_now(), _trailing_strategy(), trailing_stop_price=90.0)
+        self.assertEqual(reason, "stop_loss")
+
+    def test_trailing_stop_fires_when_price_falls_to_its_level(self):
+        reason = _check_exit(100.0, _ts_now(), 91.0, _ts_now(), _trailing_strategy(), trailing_stop_price=92.0)
+        self.assertEqual(reason, "trailing_stop")
+
+    def test_no_exit_while_above_every_level(self):
+        reason = _check_exit(100.0, _ts_now(), 130.0, _ts_now(), _trailing_strategy(), trailing_stop_price=108.0)
+        self.assertIsNone(reason)
+
+    def test_uncapped_take_profit_never_fires_on_its_own(self):
+        strategy = _trailing_strategy(take_profit_pct=None)
+        reason = _check_exit(100.0, _ts_now(), 500.0, _ts_now(), strategy, trailing_stop_price=None)
+        self.assertIsNone(reason)  # a 5x move with no trailing stop armed (armed only via peak tracking in replay_token) and no cap -- must not spuriously exit
+
+    def test_capped_take_profit_still_fires_when_set(self):
+        strategy = _trailing_strategy(take_profit_pct=50)
+        reason = _check_exit(100.0, _ts_now(), 151.0, _ts_now(), strategy, trailing_stop_price=None)
+        self.assertEqual(reason, "take_profit")
+
+
+def _ts_now():
+    return datetime.now(timezone.utc)
+
+
+class TestReplayTokenWithTrailingStop(unittest.TestCase):
+    """End-to-end through replay_token() -- the trailing-stop machinery
+    wired into the actual replay loop, not just the pure helper
+    functions above.
+    """
+
+    def _history(self, prices, *, liquidity=20000, volume=60000, start=None):
+        # buys_24h/sells_24h must actually GROW between snapshots, with
+        # buys outpacing sells -- src.observation.compute_trend derives
+        # buy_pressure from the DELTA between consecutive snapshots, not
+        # the absolute count, so a constant buys/sells figure (delta=0)
+        # always classifies as WEAK regardless of price action.
+        start = start or datetime(2026, 9, 1, tzinfo=timezone.utc)
+        return [
+            {
+                "timestamp": (start + timedelta(minutes=5 * i)).isoformat(),
+                "price_usd": p, "liquidity_usd": liquidity, "volume_24h": volume,
+                "buys_24h": 100 + 10 * i, "sells_24h": 50 + 2 * i,
+            }
+            for i, p in enumerate(prices)
+        ]
+
+    def test_a_rally_then_pullback_exits_via_trailing_stop_not_the_hard_stop(self):
+        # Steady climb to +30% above the eventual entry price, then a
+        # pullback that never touches the 25% hard stop but does fall
+        # through the trailing level.
+        prices = [1.00] * 5 + [1.05, 1.10, 1.15, 1.20, 1.25, 1.30, 1.20, 1.10]
+        history = self._history(prices)
+        strategy = _trailing_strategy(trailing_arm_pct=15, trailing_stop_pct=10, stop_loss_pct=25)
+        trades = replay_token("tok", history, strategy)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].reason, "trailing_stop")
+
+    def test_never_exits_via_trailing_stop_if_price_never_arms_it(self):
+        prices = [1.00] * 5 + [1.05, 1.08, 1.05, 1.02, 0.99, 0.80, 0.70]  # peak +8% never clears the 15% arm level, eventually hits the 25% hard stop (entry at 1.00, stop at 0.75)
+        history = self._history(prices)
+        strategy = _trailing_strategy(trailing_arm_pct=15, trailing_stop_pct=10, stop_loss_pct=25)
+        trades = replay_token("tok", history, strategy)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].reason, "stop_loss")
+
+
+class TestFoldHelpers(unittest.TestCase):
+    def _snapshots_with_timestamps(self, timestamps):
+        return {"tok-a": [{"timestamp": ts} for ts in timestamps]}
+
+    def test_compute_fold_boundaries_returns_n_minus_one_cutoffs(self):
+        timestamps = [f"2026-09-0{d}T00:00:00+00:00" for d in range(1, 5)]
+        snapshots = self._snapshots_with_timestamps(timestamps)
+        boundaries = compute_fold_boundaries(snapshots, n_folds=4)
+        self.assertEqual(len(boundaries), 3)
+        self.assertEqual(boundaries, sorted(boundaries))
+
+    def test_assign_fold_index_is_monotonic_with_time(self):
+        boundaries = [_ts("2026-09-02T00:00:00+00:00"), _ts("2026-09-03T00:00:00+00:00")]
+        self.assertEqual(assign_fold_index(_ts("2026-09-01T00:00:00+00:00"), boundaries), 0)
+        self.assertEqual(assign_fold_index(_ts("2026-09-02T12:00:00+00:00"), boundaries), 1)
+        self.assertEqual(assign_fold_index(_ts("2026-09-04T00:00:00+00:00"), boundaries), 2)
+
+    def test_fold_stability_score_is_zero_with_no_trades(self):
+        boundaries = [_ts("2026-09-02T00:00:00+00:00")]
+        self.assertEqual(fold_stability_score([], boundaries), 0.0)
+
+    def test_fold_stability_score_counts_only_folds_with_a_positive_edge(self):
+        boundaries = [_ts("2026-09-02T00:00:00+00:00")]  # 2 folds
+        # Fold 0: consistently profitable. Fold 1: consistently losing.
+        trades = [
+            _trade("2026-09-01T00:00:00+00:00", 2.0), _trade("2026-09-01T01:00:00+00:00", 2.0),
+            _trade("2026-09-03T00:00:00+00:00", -2.0), _trade("2026-09-03T01:00:00+00:00", -2.0),
+        ]
+        self.assertEqual(fold_stability_score(trades, boundaries), 0.5)
+
+    def test_split_tokens_into_groups_is_deterministic_and_covers_every_token(self):
+        snapshots = {f"addr-{i}": [{"timestamp": "2026-09-01T00:00:00+00:00"}] for i in range(20)}
+        groups_a = split_tokens_into_groups(snapshots, n_groups=2)
+        groups_b = split_tokens_into_groups(snapshots, n_groups=2)
+        self.assertEqual({k for g in groups_a for k in g}, set(snapshots.keys()))
+        self.assertEqual([set(g.keys()) for g in groups_a], [set(g.keys()) for g in groups_b])
 
 
 if __name__ == "__main__":
