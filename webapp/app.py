@@ -14,7 +14,11 @@ What this is and is NOT:
   - The Start button always launches PAPER trading (`--paper`). This
     file never imports src.live_trader or src.wallet, and never sets
     LIVE_TRADING -- there is no code path here that can place a real
-    order, regardless of what buttons are clicked.
+    order, regardless of what buttons are clicked. Same isolation on the
+    stocks side: this file never imports src.stocks.live_trader,
+    src.stocks.live_broker, or any other src.stocks.live_* module, and
+    never sets STOCKS_LIVE_TRADING -- the Stocks Start button always
+    launches the paper-trading engine loop only.
   - Emergency Stop does two independent things: it kills the running
     radar process AND engages src.kill_switch (the same kill switch
     src/live_trader.py already checks before every real order), so it

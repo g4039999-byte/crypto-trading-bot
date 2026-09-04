@@ -50,16 +50,91 @@ def _get_list(name, default):
 
 
 # =============================================================================
-# LIVE TRADING -- hard-disabled at the source level, the same
-# defense-in-depth pattern src/wallet.py's EXECUTION_ENABLED_IN_CODE
-# uses: no environment variable can turn this on. Flipping it would
-# require editing this literal line in a code review, not a config
-# change -- and nothing in this project ever has, or will in this
-# session. There is no order-placement code path in src/stocks at all
-# yet; this flag exists so that if/when one is ever built, it starts
-# from "impossible", not "off by default".
+# LIVE TRADING GATE -- three independent layers, mirroring the crypto
+# side's src/wallet.py (EXECUTION_ENABLED_IN_CODE) + src/config.py
+# (LIVE_TRADING / CONFIRM_LIVE_TRADING) pattern exactly. ALL THREE must
+# pass before src/stocks/live_broker.py will submit a single real order
+# to Alpaca's live endpoint -- see STOCKS_LIVE_TRADING_GATE.md for the
+# full runbook.
+#
+#   Layer 1 -- STOCKS_EXECUTION_ENABLED_IN_CODE: a module-level constant
+#   in src/stocks/live_broker.py itself (deliberately NOT here, and NOT
+#   env-configurable -- see that file's docstring). A human must
+#   hand-edit that source line and redeploy; no .env value can ever
+#   flip it.
+#   Layer 2 -- STOCKS_LIVE_TRADING (below): env-backed, defaults False.
+#   Layer 3 -- STOCKS_CONFIRM_LIVE_TRADING (below): must exactly equal
+#   STOCKS_REQUIRED_CONFIRM_PHRASE.
+#
+# STOCKS_LIVE_TRADING=false is the ONLY value this project has ever run
+# with. This flag used to be a bare `False` literal with zero env
+# override (so that with no order-placement code existing yet, it
+# started from "impossible" rather than merely "off"); now that a
+# documented, fully-tested (mocks/sandbox only, never real network) gate
+# exists to read it, it is promoted to the same env-backed shape as the
+# crypto side's LIVE_TRADING -- Layer 1 above still makes it inert on
+# its own regardless of what this is set to.
 # =============================================================================
-STOCKS_LIVE_TRADING = False
+STOCKS_LIVE_TRADING = _get_bool("STOCKS_LIVE_TRADING", False)
+
+# A second, independent gate: even with STOCKS_LIVE_TRADING=true, no real
+# order is sent unless this env var equals this exact phrase -- so one
+# accidental "STOCKS_LIVE_TRADING=true" in a copy-pasted .env can never
+# be enough, on its own, to place a real stock order.
+STOCKS_REQUIRED_CONFIRM_PHRASE = "I_UNDERSTAND_AND_APPROVE_STOCKS_LIVE_TRADING"
+STOCKS_CONFIRM_LIVE_TRADING = os.getenv("STOCKS_CONFIRM_LIVE_TRADING", "")
+
+# Immediate kill switch, independent of the two gates above -- if this
+# file exists, no new live order is placed, re-checked fresh before
+# every single decision (no restart needed). Create it by hand with:
+# touch data/stocks/STOP_LIVE_TRADING -- see src/stocks/kill_switch.py.
+STOCKS_KILL_SWITCH_FILE = os.getenv("STOCKS_KILL_SWITCH_FILE", "data/stocks/STOP_LIVE_TRADING")
+
+# --- Live Alpaca account credentials -- SEPARATE from ALPACA_API_KEY/
+# ALPACA_API_SECRET above, which are paper-only. Alpaca issues distinct
+# key pairs for its paper and live environments; a paper key presented
+# to the live base URL is rejected by Alpaca regardless of anything in
+# this codebase. Never set outside a local, git-ignored .env file.
+ALPACA_LIVE_API_KEY = os.getenv("ALPACA_LIVE_API_KEY", "")
+ALPACA_LIVE_API_SECRET = os.getenv("ALPACA_LIVE_API_SECRET", "")
+# The live-money base URL, kept as its own constant -- nothing outside
+# src/stocks/live_broker.py ever reads this, and live_broker.py only
+# ever reads it after all three gate layers above have already passed.
+ALPACA_LIVE_TRADING_BASE_URL = "https://api.alpaca.markets"
+
+# --- Live pilot risk limits -- deliberately much smaller than the paper
+# defaults below (STOCKS_MAX_POSITION_USD=1500, STOCKS_STARTING_CAPITAL_
+# USD=10000): a real pilot starts with "a very small amount" by explicit
+# instruction. NOT read by paper trading (src.stocks.risk_engine) at
+# all -- only by src.stocks.live_risk, imported solely by
+# live_broker.py/live_trader.py.
+STOCKS_LIVE_STARTING_CAPITAL_USD = _get_float("STOCKS_LIVE_STARTING_CAPITAL_USD", 200.0)
+STOCKS_LIVE_MAX_POSITION_USD = _get_float("STOCKS_LIVE_MAX_POSITION_USD", 25.0)
+STOCKS_LIVE_MAX_OPEN_POSITIONS = _get_int("STOCKS_LIVE_MAX_OPEN_POSITIONS", 1)
+STOCKS_LIVE_MAX_CAPITAL_DEPLOYMENT_PCT = _get_float("STOCKS_LIVE_MAX_CAPITAL_DEPLOYMENT_PCT", 50.0)
+STOCKS_LIVE_MAX_DAILY_LOSS_PCT = _get_float("STOCKS_LIVE_MAX_DAILY_LOSS_PCT", 3.0)
+# Circuit breaker: halt new live entries (an existing live position is
+# still monitored/exited normally) once realized+unrealized drawdown
+# from the live peak equity reaches this.
+STOCKS_LIVE_MAX_DRAWDOWN_PCT = _get_float("STOCKS_LIVE_MAX_DRAWDOWN_PCT", 10.0)
+STOCKS_LIVE_MAX_TRADES_PER_DAY = _get_int("STOCKS_LIVE_MAX_TRADES_PER_DAY", 2)
+# Minimum free buying power Alpaca must report, beyond the order's own
+# cost, before a live buy is even attempted -- a margin against a stale
+# or racy buying-power read, not just an exact-equality check.
+STOCKS_LIVE_MIN_BUYING_POWER_BUFFER_USD = _get_float("STOCKS_LIVE_MIN_BUYING_POWER_BUFFER_USD", 5.0)
+
+# --- Live order execution mechanics ---
+# Deliberately NOT the same generous retry count as read-only calls
+# (ALPACA_REQUEST_MAX_RETRIES above) -- blindly retrying an order
+# submission risks a double-fill if the first attempt actually succeeded
+# but the response was lost; see live_broker.py's docstring for how this
+# is handled instead (a single retry, ONLY for a connection error before
+# any response was received, plus an open-orders/position check
+# immediately before every submission).
+STOCKS_LIVE_ORDER_MAX_RETRIES = _get_int("STOCKS_LIVE_ORDER_MAX_RETRIES", 1)
+STOCKS_LIVE_ORDER_TIMEOUT_SECONDS = _get_float("STOCKS_LIVE_ORDER_TIMEOUT_SECONDS", 15.0)
+STOCKS_LIVE_ORDER_POLL_SECONDS = _get_float("STOCKS_LIVE_ORDER_POLL_SECONDS", 2.0)
+STOCKS_LIVE_ORDER_FILL_TIMEOUT_SECONDS = _get_float("STOCKS_LIVE_ORDER_FILL_TIMEOUT_SECONDS", 60.0)
 
 # --- Alpaca (broker + market data) -- optional, free paper trading and
 # market data once you have an account; nothing here has ever been
