@@ -103,6 +103,31 @@ class Strategy:
     trend_score_override: dict = None  # e.g. {"RISING": 55, "STRONG": 55} -- a trend key present here must ALSO clear this (higher) min_score, on top of the base min_score check; a "weight reduction" rather than a hard exclusion.
     max_velocity_pct_per_min: float = None  # None = no cap; otherwise reject entry if price has moved more than this many %/minute since first-seen (a proxy for "already pumped hard/fast -- buying the top" rather than early, sustainable momentum).
     require_trend_persistence: bool = False  # if True, a STRONG/RISING entry additionally requires the PREVIOUS evaluated point for this token to have ALSO been STRONG/RISING (momentum that has held for at least two consecutive checks, not a single-snapshot spike). NEUTRAL entries are never affected by this.
+    # --- "Smart" velocity-cap qualifiers (2026-09-04, round 2) -- None =
+    # max_velocity_pct_per_min (if set) applies unconditionally to every
+    # entry, exactly as before. Setting any of these narrows WHEN the
+    # cap applies, instead of a blanket cutoff -- e.g. only distrust a
+    # fast mover when its trend is RISING specifically, or when its pool
+    # is thin, or when volume is also unusually elevated for its size
+    # (item 3's "الجمع بين velocity + liquidity + volume").
+    velocity_cap_trends: tuple = None  # None = cap applies regardless of trend; otherwise only applies when evaluated["trend"] is one of these
+    velocity_cap_max_liquidity_usd: float = None  # None = cap applies regardless of liquidity; otherwise only applies when liquidity is BELOW this (a thin pool moving fast is riskier than a deep one moving the same %)
+    velocity_cap_min_relative_volume: float = None  # None = cap applies regardless of relative volume; otherwise only applies when relative_volume (volume/liquidity) is AT OR ABOVE this (a fast move on unusually heavy volume relative to its own pool, not just a fast move alone)
+    # --- Velocity-spike cooldown (2026-09-04, round 2) -- a DIFFERENT
+    # mechanism from max_velocity_pct_per_min's hard, permanent reject:
+    # instead of turning down a fast-moving token forever, note the
+    # moment it was seen moving faster than velocity_spike_threshold_
+    # pct_per_min and simply refuse entry on that SAME token for the
+    # next velocity_spike_cooldown_minutes -- "delay the entry a little
+    # when the move looks extreme" (item 3) rather than skip it outright;
+    # a token that cools off and still otherwise qualifies once the
+    # cooldown lapses can still be entered. Mirrors stop_loss_cooldown_
+    # minutes' existing per-token cooldown pattern exactly. Both fields
+    # must be set together for this to do anything; independent of
+    # max_velocity_pct_per_min/velocity_cap_* above (a strategy can use
+    # either mechanism, both, or neither).
+    velocity_spike_threshold_pct_per_min: float = None
+    velocity_spike_cooldown_minutes: float = None
 
 
 @dataclass
@@ -234,6 +259,23 @@ def _evaluate_point(history, idx):
 _ELEVATED_TRENDS = ("STRONG", "RISING")
 
 
+def _velocity_cap_applies(evaluated, strategy):
+    """Whether strategy.max_velocity_pct_per_min's cap should even be
+    checked for this candidate -- narrowed by velocity_cap_trends/
+    velocity_cap_max_liquidity_usd/velocity_cap_min_relative_volume when
+    those are set (see Strategy's docstring comments). With none of
+    those three set, this is unconditionally True -- exactly the
+    original blanket-cap behavior.
+    """
+    if strategy.velocity_cap_trends is not None and evaluated["trend"] not in strategy.velocity_cap_trends:
+        return False
+    if strategy.velocity_cap_max_liquidity_usd is not None and evaluated["liquidity"] >= strategy.velocity_cap_max_liquidity_usd:
+        return False
+    if strategy.velocity_cap_min_relative_volume is not None and evaluated["relative_volume"] < strategy.velocity_cap_min_relative_volume:
+        return False
+    return True
+
+
 def _passes_entry(evaluated, strategy, previous_evaluated=None):
     if evaluated["score"] < strategy.min_score:
         return False
@@ -242,8 +284,9 @@ def _passes_entry(evaluated, strategy, previous_evaluated=None):
     if strategy.trend_score_override and evaluated["trend"] in strategy.trend_score_override:
         if evaluated["score"] < strategy.trend_score_override[evaluated["trend"]]:
             return False
-    if strategy.max_velocity_pct_per_min is not None and evaluated["velocity_pct_per_min"] > strategy.max_velocity_pct_per_min:
-        return False
+    if strategy.max_velocity_pct_per_min is not None and _velocity_cap_applies(evaluated, strategy):
+        if evaluated["velocity_pct_per_min"] > strategy.max_velocity_pct_per_min:
+            return False
     if strategy.require_trend_persistence and evaluated["trend"] in _ELEVATED_TRENDS:
         if previous_evaluated is None or previous_evaluated["trend"] not in _ELEVATED_TRENDS:
             return False
@@ -318,6 +361,7 @@ def replay_token(token, history, strategy):
     trades = []
     in_position = None
     cooldown_until = None  # datetime | None -- set after a stop_loss when strategy.stop_loss_cooldown_minutes > 0
+    velocity_cooldown_until = None  # datetime | None -- rolling cooldown re-armed every time this token is seen moving faster than velocity_spike_threshold_pct_per_min (see Strategy's docstring)
 
     for idx in range(1, len(history)):
         current = history[idx]
@@ -349,6 +393,13 @@ def replay_token(token, history, strategy):
             continue
 
         evaluated = _evaluate_point(history, idx)
+
+        if strategy.velocity_spike_cooldown_minutes and strategy.velocity_spike_threshold_pct_per_min is not None:
+            if evaluated["velocity_pct_per_min"] > strategy.velocity_spike_threshold_pct_per_min:
+                velocity_cooldown_until = ts + timedelta(minutes=strategy.velocity_spike_cooldown_minutes)
+            if velocity_cooldown_until is not None and ts < velocity_cooldown_until:
+                continue
+
         previous_evaluated = _evaluate_point(history, idx - 1) if (strategy.require_trend_persistence and idx >= 2) else None
         if _passes_entry(evaluated, strategy, previous_evaluated=previous_evaluated):
             discovery_to_entry_s = (ts - _parse_ts(history[0]["timestamp"])).total_seconds()
@@ -580,6 +631,22 @@ _PRE_ELEVATED_TREND_GATE_BASE = Strategy(
     max_liq_drawdown_pct=40, stop_loss_cooldown_minutes=60,
 )
 
+# CANDIDATE's rules after round 1 (ENTRY_SCORE_PENALTY_55 adopted) but
+# BEFORE round 2 (the velocity-spike cooldown below) -- kept as its own
+# object, same reasoning as _PRE_ELEVATED_TREND_GATE_BASE above, so
+# round-2's RISING_VELOCITY_VARIANTS (via _current_candidate_variant())
+# are tested against round 1's baseline, never accidentally stacked on
+# top of round 2's own already-adopted change.
+_PRE_VELOCITY_SPIKE_GATE_BASE = Strategy(
+    name="pre-round-2 baseline (not directly used as a comparison target)",
+    min_score=40, entry_trends=("STRONG", "RISING", "NEUTRAL"),
+    min_liquidity_usd=5000, min_volume_24h_usd=25000,
+    min_age_minutes=15, max_age_minutes=180,
+    stop_loss_pct=25, take_profit_pct=25, max_holding_minutes=240,
+    max_liq_drawdown_pct=40, stop_loss_cooldown_minutes=60,
+    trend_score_override={"RISING": 55, "STRONG": 55},
+)
+
 CANDIDATE = Strategy(
     name="CANDIDATE (deployed, matches src/config.py's PAPER_* defaults)",
     min_score=40, entry_trends=("STRONG", "RISING", "NEUTRAL"),
@@ -587,14 +654,23 @@ CANDIDATE = Strategy(
     min_age_minutes=15, max_age_minutes=180,
     stop_loss_pct=25, take_profit_pct=25, max_holding_minutes=240,
     max_liq_drawdown_pct=40, stop_loss_cooldown_minutes=60,
-    # 2026-09-04: adopted after this exact comparison qualified on
-    # out-of-sample/fold-stability/drawdown evidence -- see
+    # Round 1 (2026-09-04): adopted after this exact comparison
+    # qualified on out-of-sample/fold-stability/drawdown evidence -- see
     # PAPER_ELEVATED_TREND_MIN_SCORE's docstring in src/config.py for the
     # full evidence trail. Matches ENTRY_SCORE_PENALTY_55 below, kept as
     # a separate named variant (built off _PRE_ELEVATED_TREND_GATE_BASE,
     # not this CANDIDATE) so a future re-run still shows the same
     # apples-to-apples comparison this decision was based on.
     trend_score_override={"RISING": 55, "STRONG": 55},
+    # Round 2 (2026-09-04): adopted after ENTRY_VELOCITY_SPIKE_COOLDOWN
+    # was the only round-2 variant whose improvement held under every
+    # robustness check (coin-group split, two OOS cutoffs, every
+    # walk-forward fold count) -- see PAPER_VELOCITY_SPIKE_THRESHOLD_PCT_
+    # PER_MIN's docstring in src/config.py for the full evidence trail.
+    # Matches ENTRY_VELOCITY_SPIKE_COOLDOWN below, kept as a separate
+    # named variant (built off _PRE_VELOCITY_SPIKE_GATE_BASE, not this
+    # CANDIDATE) for the same reason as round 1's split above.
+    velocity_spike_threshold_pct_per_min=5.0, velocity_spike_cooldown_minutes=30,
 )
 
 # --- Trailing-stop variants (2026-09-04) -- all built on top of
@@ -730,6 +806,61 @@ ENTRY_FILTER_VARIANTS = (
 )
 
 
+def _current_candidate_variant(name, **overrides):
+    """A Strategy identical to _PRE_VELOCITY_SPIKE_GATE_BASE (round 1's
+    adopted rules -- ENTRY_SCORE_PENALTY_55's trend_score_override --
+    but BEFORE round 2's own adopted change) except for the given
+    overrides. Deliberately NOT built from CANDIDATE itself, which now
+    already includes round 2's velocity-spike cooldown -- see
+    _PRE_ELEVATED_TREND_GATE_BASE's docstring above for why (same
+    reasoning, one round later). Round-2 (2026-09-04) RISING/high-
+    velocity variants below are layered on top of round 1's adopted
+    change, never replacing it -- ENTRY_SCORE_PENALTY_55 itself is not
+    touched by anything below.
+    """
+    from dataclasses import replace
+    return replace(_PRE_VELOCITY_SPIKE_GATE_BASE, name=name, **overrides)
+
+
+# --- Round 2 (2026-09-04): CANDIDATE now includes ENTRY_SCORE_PENALTY_55
+# (RISING/STRONG need score>=55), but scripts/diagnose_paper_strategy.py
+# and round 1's own sub-metric reporting showed RISING itself barely
+# improved even at the higher score bar, and high-"velocity" (already-
+# fast-moved) entries stayed weak across every round-1 variant. These
+# five variants each test a genuinely different way to distinguish
+# healthy, sustainable momentum from a late/extreme spike, all layered
+# on top of the already-adopted change (never replacing it):
+ENTRY_VELOCITY_CAP_RISING_ONLY = _current_candidate_variant(
+    "ENTRY_VELOCITY_CAP_RISING_ONLY (velocity cap >4%/min applies to RISING only)",
+    max_velocity_pct_per_min=4.0, velocity_cap_trends=("RISING",),
+)
+
+ENTRY_VELOCITY_CAP_THIN_LIQUIDITY = _current_candidate_variant(
+    "ENTRY_VELOCITY_CAP_THIN_LIQUIDITY (velocity cap >4%/min applies only when liquidity<$20k)",
+    max_velocity_pct_per_min=4.0, velocity_cap_max_liquidity_usd=20000,
+)
+
+ENTRY_VELOCITY_CAP_HIGH_RELVOL = _current_candidate_variant(
+    "ENTRY_VELOCITY_CAP_HIGH_RELVOL (velocity cap >4%/min applies only when relative_volume>=15)",
+    max_velocity_pct_per_min=4.0, velocity_cap_min_relative_volume=15.0,
+)
+
+ENTRY_VELOCITY_SPIKE_COOLDOWN = _current_candidate_variant(
+    "ENTRY_VELOCITY_SPIKE_COOLDOWN (seeing >5%/min triggers a 30-minute per-token entry delay, not a permanent reject)",
+    velocity_spike_threshold_pct_per_min=5.0, velocity_spike_cooldown_minutes=30,
+)
+
+ENTRY_RISING_PERSISTENCE = _current_candidate_variant(
+    "ENTRY_RISING_PERSISTENCE (RISING/STRONG must have also been elevated one snapshot earlier, re-tested on the new baseline)",
+    require_trend_persistence=True,
+)
+
+RISING_VELOCITY_VARIANTS = (
+    ENTRY_VELOCITY_CAP_RISING_ONLY, ENTRY_VELOCITY_CAP_THIN_LIQUIDITY, ENTRY_VELOCITY_CAP_HIGH_RELVOL,
+    ENTRY_VELOCITY_SPIKE_COOLDOWN, ENTRY_RISING_PERSISTENCE,
+)
+
+
 N_FOLDS = 4  # walk-forward folds -- kept smaller than the stocks side's 5 given ~4.6 days of data vs stocks' 10 years; see fold_stability_score's docstring
 MIN_TRADES_FOR_SIGNIFICANCE = 30  # a strategy with fewer trades than this in a bucket is not judged on that bucket
 
@@ -848,6 +979,17 @@ def main():
     # historical comparison the 2026-09-04 decision was based on.
     compare_group(
         "ENTRY-MOMENTUM-QUALITY VARIANTS", _PRE_ELEVATED_TREND_GATE_BASE, ENTRY_FILTER_VARIANTS,
+        snapshots, cutoff_ts, fold_boundaries, report_rising_strong_velocity=True,
+    )
+    # Round 2: compared against _PRE_VELOCITY_SPIKE_GATE_BASE (round 1's
+    # adopted rules, BEFORE round 2's own adopted change) -- CANDIDATE
+    # now already includes ENTRY_VELOCITY_SPIKE_COOLDOWN's change, so
+    # comparing these variants against it would compare that winner
+    # against an identical copy of itself. This reproduces the exact
+    # historical comparison the round-2 decision was based on.
+    compare_group(
+        "RISING/HIGH-VELOCITY VARIANTS (round 2, layered on round 1's adopted CANDIDATE)",
+        _PRE_VELOCITY_SPIKE_GATE_BASE, RISING_VELOCITY_VARIANTS,
         snapshots, cutoff_ts, fold_boundaries, report_rising_strong_velocity=True,
     )
 

@@ -15,6 +15,7 @@ from scripts.backtest_paper_strategy import (
     _check_exit,
     _passes_entry,
     _update_trailing_stop,
+    _velocity_cap_applies,
     assign_fold_index,
     compute_fold_boundaries,
     compute_oos_cutoff,
@@ -225,6 +226,107 @@ class TestPassesEntryWithTrendPersistence(unittest.TestCase):
         strategy = _entry_strategy(require_trend_persistence=True)
         evaluated = _evaluated(trend="NEUTRAL")
         self.assertTrue(_passes_entry(evaluated, strategy, previous_evaluated=None))
+
+
+class TestVelocityCapApplies(unittest.TestCase):
+    """The 'smart' velocity-cap qualifiers (round 2, 2026-09-04) -- with
+    none of velocity_cap_trends/velocity_cap_max_liquidity_usd/
+    velocity_cap_min_relative_volume set, the cap applies unconditionally
+    (the original round-1 behavior).
+    """
+
+    def test_applies_unconditionally_with_no_qualifiers_set(self):
+        strategy = _entry_strategy(max_velocity_pct_per_min=4.0)
+        self.assertTrue(_velocity_cap_applies(_evaluated(trend="NEUTRAL", liquidity=1_000_000, relative_volume=0.1), strategy))
+
+    def test_trend_qualifier_excludes_trends_not_listed(self):
+        strategy = _entry_strategy(max_velocity_pct_per_min=4.0, velocity_cap_trends=("RISING",))
+        self.assertFalse(_velocity_cap_applies(_evaluated(trend="STRONG"), strategy))
+        self.assertTrue(_velocity_cap_applies(_evaluated(trend="RISING"), strategy))
+
+    def test_liquidity_qualifier_only_applies_below_the_threshold(self):
+        strategy = _entry_strategy(max_velocity_pct_per_min=4.0, velocity_cap_max_liquidity_usd=20000)
+        self.assertFalse(_velocity_cap_applies(_evaluated(liquidity=25000), strategy))  # deep pool -- cap does not apply
+        self.assertTrue(_velocity_cap_applies(_evaluated(liquidity=10000), strategy))  # thin pool -- cap applies
+
+    def test_relative_volume_qualifier_only_applies_at_or_above_the_threshold(self):
+        strategy = _entry_strategy(max_velocity_pct_per_min=4.0, velocity_cap_min_relative_volume=15.0)
+        self.assertFalse(_velocity_cap_applies(_evaluated(relative_volume=5.0), strategy))
+        self.assertTrue(_velocity_cap_applies(_evaluated(relative_volume=15.0), strategy))
+
+    def test_qualifiers_combine_with_and_semantics(self):
+        strategy = _entry_strategy(max_velocity_pct_per_min=4.0, velocity_cap_trends=("RISING",), velocity_cap_max_liquidity_usd=20000)
+        # Right trend, but liquidity too deep -- must not apply.
+        self.assertFalse(_velocity_cap_applies(_evaluated(trend="RISING", liquidity=25000), strategy))
+        # Both conditions met.
+        self.assertTrue(_velocity_cap_applies(_evaluated(trend="RISING", liquidity=10000), strategy))
+
+
+class TestPassesEntryWithSmartVelocityCap(unittest.TestCase):
+    def test_a_qualified_cap_rejects_only_the_targeted_trend(self):
+        strategy = _entry_strategy(max_velocity_pct_per_min=4.0, velocity_cap_trends=("RISING",))
+        self.assertFalse(_passes_entry(_evaluated(trend="RISING", velocity_pct_per_min=10.0), strategy))
+        self.assertTrue(_passes_entry(_evaluated(trend="STRONG", velocity_pct_per_min=10.0), strategy))
+
+
+class TestVelocitySpikeCooldownInReplayToken(unittest.TestCase):
+    """End-to-end through replay_token(): a token seen moving faster than
+    velocity_spike_threshold_pct_per_min gets a temporary per-token
+    entry delay (velocity_spike_cooldown_minutes), not a permanent
+    reject -- once it cools off and the cooldown lapses, it can still be
+    entered if it otherwise qualifies.
+    """
+
+    def _history(self, prices, *, liquidity=20000, volume=60000, start=None):
+        start = start or datetime(2026, 9, 1, tzinfo=timezone.utc)
+        return [
+            {
+                "timestamp": (start + timedelta(minutes=5 * i)).isoformat(),
+                "price_usd": p, "liquidity_usd": liquidity, "volume_24h": volume,
+                "buys_24h": 100 + 10 * i, "sells_24h": 50 + 2 * i,
+            }
+            for i, p in enumerate(prices)
+        ]
+
+    def test_entry_is_delayed_past_the_cooldown_not_permanently_blocked(self):
+        # +100% right at the earliest possible entry point (idx=3,
+        # age=15m) gives velocity=6.67%/min there, then the price goes
+        # flat -- velocity keeps decaying afterward purely because it is
+        # cumulative-change-since-first-seen divided by a growing age
+        # (idx=4/age=20 -> 5.0%/min, idx=5/age=25 -> 4.0%/min, ...).
+        # The extra final bar at 3.0 (+50% from the 2.0 entry price, past
+        # the 25% take-profit) is only there so both positions actually
+        # CLOSE within this history and show up in replay_token()'s
+        # returned trades -- an open position at the end of history data
+        # is dropped, not returned, same as the live system just hasn't
+        # decided yet.
+        prices = [1.0, 1.0, 1.0] + [2.0] * 20 + [3.0]
+        history = self._history(prices)
+
+        # A HARD cap at the same threshold lets it in as soon as
+        # velocity next drops to/under 5.0%/min -- idx=4 (age=20m).
+        hard_cap_strategy = _entry_strategy(min_age_minutes=15, max_velocity_pct_per_min=5.0)
+        hard_cap_trades = replay_token("tok", history, hard_cap_strategy)
+        self.assertEqual(len(hard_cap_trades), 1)
+        self.assertEqual(hard_cap_trades[0].entry_age_minutes, 20.0)
+
+        # The SPIKE-COOLDOWN mechanism, same 5.0%/min threshold, delays
+        # entry for a full 60 minutes from the spike itself (idx=3,
+        # age=15) regardless of how quickly velocity itself decays --
+        # first eligible re-check is age=75 (15 + 60), strictly later
+        # than the hard cap's age=20.
+        cooldown_strategy = _entry_strategy(
+            min_age_minutes=15, velocity_spike_threshold_pct_per_min=5.0, velocity_spike_cooldown_minutes=60,
+        )
+        cooldown_trades = replay_token("tok", history, cooldown_strategy)
+        self.assertEqual(len(cooldown_trades), 1)
+        self.assertEqual(cooldown_trades[0].entry_age_minutes, 75.0)
+        self.assertGreater(cooldown_trades[0].entry_age_minutes, hard_cap_trades[0].entry_age_minutes)
+
+    def test_disabled_by_default_matches_original_behavior(self):
+        strategy = _entry_strategy()  # neither velocity_spike field set
+        self.assertIsNone(strategy.velocity_spike_threshold_pct_per_min)
+        self.assertIsNone(strategy.velocity_spike_cooldown_minutes)
 
 
 class TestUpdateTrailingStop(unittest.TestCase):

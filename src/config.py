@@ -251,6 +251,49 @@ PAPER_ENTRY_TRENDS = tuple(
 # ADDITIONAL, higher bar that only RISING/STRONG entries must also clear.
 PAPER_ELEVATED_TREND_MIN_SCORE = _get_int("PAPER_ELEVATED_TREND_MIN_SCORE", 55)
 
+# 2026-09-04, round 2: PAPER_ELEVATED_TREND_MIN_SCORE above helped STRONG
+# but scripts/diagnose_paper_strategy.py's own sub-metric reporting on
+# it showed RISING barely improved even at the higher score bar, and
+# high-"velocity" (already-fast-moved) entries stayed weak regardless of
+# trend. scripts/backtest_paper_strategy.py's round-2 comparison tested
+# 5 further, independent mechanisms layered on top of the round-1
+# change (never replacing it) -- a targeted velocity cap on RISING only,
+# a velocity cap that only applies when liquidity is thin, one that only
+# applies when relative volume is also elevated, a persistence
+# confirmation, and this one: a temporary per-token entry DELAY
+# (velocity-spike cooldown) rather than a permanent reject. This was the
+# only one whose improvement held up under every robustness check run
+# (not just the headline comparison): a 4-way coin-group split showed no
+# worse dispersion than the baseline's own; two different out-of-sample
+# cutoffs (0.6 and 0.7 in-sample fraction) both showed a large, real
+# improvement; and fold_stability improved (0.5->0.75) at EVERY
+# walk-forward fold count tested (3/4/5/6 folds), not just one. Full-
+# dataset profit_factor crossed above 1.0 for the first time in this
+# whole project's paper-trading history (0.86->1.30).
+#
+# Honest limitations, kept rather than hidden: total trade count nearly
+# halved (48 vs 116 in the validation run) -- an acceptable cost at the
+# paper-only research stage, but it means the absolute out-of-sample
+# sample stays thin (n=7-9). RISING's own sub-bucket looked much better
+# in that same run (win rate 57.1%, n=7) but n=7 is far too small to
+# call RISING itself reliably fixed -- this is a genuine improvement to
+# the aggregate, not proof the RISING-specific problem is solved. The
+# separately-tested "only apply the cap when relative_volume is high"
+# variant looked similarly good on the headline OOS number but showed
+# ZERO fold_stability improvement over the baseline at any fold count
+# once checked -- rejected as likely noise concentrated in the OOS
+# window, not a real mechanism; not adopted.
+#
+# Threshold=5.0 means "moved more than 5% per minute of age since this
+# token's first-ever radar snapshot" (the SAME quantity src.paper_trader.
+# _recent_velocity_spike() computes from data/snapshots.json, kept
+# faithful to what was actually backtested). Cooldown=30 minutes means a
+# token seen spiking that fast is skipped for entry for 30 minutes from
+# the spike, not forever -- if it cools off and still otherwise
+# qualifies once the window lapses, it can still be bought.
+PAPER_VELOCITY_SPIKE_THRESHOLD_PCT_PER_MIN = _get_float("PAPER_VELOCITY_SPIKE_THRESHOLD_PCT_PER_MIN", 5.0)
+PAPER_VELOCITY_SPIKE_COOLDOWN_MINUTES = _get_float("PAPER_VELOCITY_SPIKE_COOLDOWN_MINUTES", 30.0)
+
 # Liquidity/volume/age safety floors for paper trades -- reuses the
 # general radar filter's liquidity/volume bar (MIN_LIQUIDITY_USD /
 # MIN_VOLUME_24H_USD above: "worth looking at" at all) rather than the

@@ -245,6 +245,74 @@ class TestFullBuyThenSellCycle(unittest.TestCase):
         state = paper_portfolio.load_state()
         self.assertEqual(state["open_positions"], [])
 
+    def test_recent_velocity_spike_blocks_entry(self):
+        # 2026-09-04, round 2: this token's first-ever snapshot was
+        # $0.50, and 10 minutes later (well within the default 30m
+        # cooldown window) it had already reached $1.00 -- +100% over
+        # 10 minutes = 10%/min, well past the default 5%/min threshold.
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        first_seen = now - timedelta(minutes=10)
+        snapshot.SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.SNAPSHOT_FILE.write_text(json.dumps({
+            "addr-1": [
+                {"timestamp": first_seen.isoformat(), "price_usd": "0.50", "liquidity_usd": 20000,
+                 "volume_24h": 60000, "buys_24h": 90, "sells_24h": 40},
+                {"timestamp": now.isoformat(), "price_usd": "1.00", "liquidity_usd": 20000,
+                 "volume_24h": 60000, "buys_24h": 95, "sells_24h": 45},
+            ]
+        }), encoding="utf-8")
+
+        decisions = paper_trader.run_paper_cycle([make_pair(price_usd=1.00)])
+        self.assertEqual(decisions[-1]["action"], "SKIP")
+        self.assertIn("velocity-spike cooldown", decisions[-1]["reason"])
+        state = paper_portfolio.load_state()
+        self.assertEqual(state["open_positions"], [])
+
+    def test_a_spike_outside_the_cooldown_window_no_longer_blocks_entry(self):
+        # The same +100%/10min spike as above, but it happened 90
+        # minutes ago -- well outside the default 30-minute cooldown --
+        # so this token can be bought again now.
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        first_seen = now - timedelta(minutes=100)
+        spike_at = now - timedelta(minutes=90)
+        snapshot.SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.SNAPSHOT_FILE.write_text(json.dumps({
+            "addr-1": [
+                {"timestamp": first_seen.isoformat(), "price_usd": "0.50", "liquidity_usd": 20000,
+                 "volume_24h": 60000, "buys_24h": 90, "sells_24h": 40},
+                {"timestamp": spike_at.isoformat(), "price_usd": "1.00", "liquidity_usd": 20000,
+                 "volume_24h": 60000, "buys_24h": 95, "sells_24h": 45},
+            ]
+        }), encoding="utf-8")
+
+        decisions = paper_trader.run_paper_cycle([make_pair(price_usd=1.00)])
+        self.assertEqual(decisions[-1]["action"], "BUY")
+
+    def test_steady_movement_with_no_spike_is_never_blocked(self):
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        first_seen = now - timedelta(minutes=20)
+        snapshot.SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.SNAPSHOT_FILE.write_text(json.dumps({
+            "addr-1": [
+                {"timestamp": first_seen.isoformat(), "price_usd": "0.95", "liquidity_usd": 20000,
+                 "volume_24h": 60000, "buys_24h": 90, "sells_24h": 40},
+                {"timestamp": now.isoformat(), "price_usd": "1.00", "liquidity_usd": 20000,
+                 "volume_24h": 60000, "buys_24h": 95, "sells_24h": 45},
+            ]
+        }), encoding="utf-8")
+
+        decisions = paper_trader.run_paper_cycle([make_pair(price_usd=1.00)])
+        self.assertEqual(decisions[-1]["action"], "BUY")
+
     def test_stop_loss_cooldown_blocks_immediate_reentry_after_a_loss(self):
         paper_trader.run_paper_cycle([make_pair(price_usd=1.00)])  # cycle 1: buy
 

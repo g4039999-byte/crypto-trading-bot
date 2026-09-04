@@ -36,6 +36,8 @@ from src.config import (
     PAPER_MIN_SCORE,
     PAPER_MIN_VOLUME_24H_USD,
     PAPER_STOP_LOSS_COOLDOWN_MINUTES,
+    PAPER_VELOCITY_SPIKE_COOLDOWN_MINUTES,
+    PAPER_VELOCITY_SPIKE_THRESHOLD_PCT_PER_MIN,
     SELLABILITY_PROBE_SOL,
 )
 from src.jupiter_client import round_trip_check
@@ -102,6 +104,69 @@ def _discovery_to_entry_seconds(address):
     return (datetime.now(timezone.utc) - first_dt).total_seconds()
 
 
+def _recent_velocity_spike(address, now=None):
+    """True if this token has been seen moving faster than
+    PAPER_VELOCITY_SPIKE_THRESHOLD_PCT_PER_MIN (%/minute since the
+    radar's first-ever snapshot of it -- the SAME quantity scripts/
+    backtest_paper_strategy.py's velocity_pct_per_min computes, kept
+    faithful to what was actually backtested rather than a hand-
+    approximated equivalent) at ANY point within the last
+    PAPER_VELOCITY_SPIKE_COOLDOWN_MINUTES. Delays entry on a token that
+    has recently pumped hard/fast -- a "buying the top" proxy -- for a
+    while rather than rejecting it forever: a token that cools off and
+    still otherwise qualifies once the window lapses can still be
+    bought. See PAPER_VELOCITY_SPIKE_THRESHOLD_PCT_PER_MIN's docstring
+    in src/config.py for the backtest evidence this was validated
+    against (fold_stability 0.5->0.75, confirmed across every
+    walk-forward fold count and two different out-of-sample cutoffs
+    tested, not just one lucky comparison).
+    """
+    if not PAPER_VELOCITY_SPIKE_THRESHOLD_PCT_PER_MIN or not PAPER_VELOCITY_SPIKE_COOLDOWN_MINUTES:
+        return False
+    history = load_snapshots(address)
+    if len(history) < 2:
+        return False
+
+    first = history[0]
+    try:
+        first_price = float(first.get("price_usd"))
+    except (TypeError, ValueError):
+        return False
+    if not first_price:
+        return False
+    first_ts_raw = first.get("timestamp")
+    if not first_ts_raw:
+        return False
+    try:
+        first_dt = datetime.fromisoformat(first_ts_raw)
+    except (ValueError, TypeError):
+        return False
+
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=PAPER_VELOCITY_SPIKE_COOLDOWN_MINUTES)
+
+    for point in history:
+        point_ts_raw = point.get("timestamp")
+        if not point_ts_raw:
+            continue
+        try:
+            point_dt = datetime.fromisoformat(point_ts_raw)
+            point_price = float(point.get("price_usd"))
+        except (ValueError, TypeError):
+            continue
+        if point_dt < cutoff:
+            continue  # too old to still count as a "recent" spike
+
+        age_minutes = (point_dt - first_dt).total_seconds() / 60
+        if age_minutes <= 0:
+            continue
+        velocity = (point_price - first_price) / first_price * 100 / age_minutes
+        if velocity > PAPER_VELOCITY_SPIKE_THRESHOLD_PCT_PER_MIN:
+            return True
+
+    return False
+
+
 def _recent_stop_loss(state, address):
     """True if this exact token was closed via stop_loss within the
     last PAPER_STOP_LOSS_COOLDOWN_MINUTES. Observed live on 2026-09-03:
@@ -147,6 +212,14 @@ def evaluate_entry(evaluated_pair, probe_check=None):
 
     if _recent_stop_loss(state, address):
         reason = f"stop-loss cooldown active ({PAPER_STOP_LOSS_COOLDOWN_MINUTES:.0f}m since last stop_loss on this token)"
+        log_decision("SKIP", symbol, address, reason)
+        return {"action": "SKIP", "reason": reason, "size_usd": None}
+
+    if _recent_velocity_spike(address):
+        reason = (
+            f"velocity-spike cooldown active (moved >{PAPER_VELOCITY_SPIKE_THRESHOLD_PCT_PER_MIN:.0f}%/min within "
+            f"the last {PAPER_VELOCITY_SPIKE_COOLDOWN_MINUTES:.0f}m) -- see PAPER_VELOCITY_SPIKE_* in src/config.py"
+        )
         log_decision("SKIP", symbol, address, reason)
         return {"action": "SKIP", "reason": reason, "size_usd": None}
 
@@ -254,6 +327,8 @@ def _skip_reason_bucket(reason):
     """
     if "already holding" in reason:
         return "already_held"
+    if "velocity-spike cooldown" in reason:
+        return "velocity_spike_cooldown"
     if "cooldown" in reason:
         return "stop_loss_cooldown"
     if "already at the max" in reason:
