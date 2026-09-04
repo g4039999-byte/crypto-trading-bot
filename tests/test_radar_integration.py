@@ -189,6 +189,36 @@ class TestRadarIntegration(unittest.TestCase):
         self.assertTrue(good["ok"])
         self.assertFalse(good["x_trend_detected"])
 
+    def test_pumpfun_discovered_addresses_are_merged_into_the_query(self):
+        with mock.patch("src.radar.fetch_solana_token_addresses", return_value=["addr-good"]), \
+                mock.patch("src.radar.fetch_latest_launch_addresses", return_value=["addr-weak"]), \
+                mock.patch("src.radar.fetch_pairs", return_value=FIXTURE_PAIRS[:2]) as mocked_fetch_pairs:
+            radar.run_radar()
+
+        queried_addresses = mocked_fetch_pairs.call_args[0][0]
+        self.assertIn("addr-good", queried_addresses)
+        self.assertIn("addr-weak", queried_addresses)
+
+    def test_pumpfun_discovery_failure_does_not_break_the_radar_cycle(self):
+        """The core resilience guarantee, mirrored from X above: Pump.fun
+        being unconfigured, down, or erroring must never affect the
+        radar's own DexScreener-sourced results.
+        """
+        with mock.patch("src.radar.fetch_solana_token_addresses", return_value=["addr-good"]), \
+                mock.patch("src.radar.fetch_latest_launch_addresses", side_effect=RuntimeError("Pump.fun is down")), \
+                mock.patch("src.radar.fetch_pairs", return_value=[FIXTURE_PAIRS[0]]):
+            results = radar.run_radar()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["symbol"], "GOOD")
+
+    def test_pumpfun_returning_nothing_is_not_treated_as_an_error(self):
+        with mock.patch("src.radar.fetch_solana_token_addresses", return_value=["addr-good"]), \
+                mock.patch("src.radar.fetch_latest_launch_addresses", return_value=[]), \
+                mock.patch("src.radar.fetch_pairs", return_value=[FIXTURE_PAIRS[0]]):
+            results = radar.run_radar()
+        self.assertEqual(len(results), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,7 @@ from src.dex_client import fetch_pairs, fetch_solana_token_addresses
 from src.logging_config import setup_logging
 from src.momentum import calculate_momentum
 from src.observation import analyze_observation
+from src.pumpfun_client import fetch_latest_launch_addresses
 from src.scoring import calculate_score
 from src.snapshot import known_addresses, save_snapshot
 from src.stage import classify_stage
@@ -184,23 +185,35 @@ def run_radar():
     problems, since dex_client and evaluate_pair already degrade
     gracefully and log what happened.
 
-    Queries both newly-discovered addresses (DexScreener's "latest
-    profiles" feed) and a watchlist of previously-seen addresses
-    (RADAR_WATCHLIST_SIZE, from data/snapshots.json), so a token keeps
-    accumulating snapshots across cycles instead of only ever getting
-    one -- that's what lets observation.py report a real trend instead
-    of INSUFFICIENT_DATA once the radar has run more than once.
+    Queries newly-discovered addresses from TWO independent feeds --
+    DexScreener's "latest profiles" feed and, if configured (see
+    src.pumpfun_client), Solana Tracker's Pump.fun launch feed -- plus a
+    watchlist of previously-seen addresses (RADAR_WATCHLIST_SIZE, from
+    data/snapshots.json), so a token keeps accumulating snapshots across
+    cycles instead of only ever getting one -- that's what lets
+    observation.py report a real trend instead of INSUFFICIENT_DATA once
+    the radar has run more than once. Pump.fun's feed is purely additive
+    (more candidate addresses); src.dex_client remains the only source
+    of the actual liquidity/volume/txns data used for scoring, and a
+    failure/empty result from it is never a reason to fail the cycle.
     """
     discovered = fetch_solana_token_addresses()
+
+    try:
+        pumpfun_discovered = fetch_latest_launch_addresses()
+    except Exception:
+        logger.exception("Pump.fun discovery failed this cycle -- continuing with DexScreener + watchlist only")
+        pumpfun_discovered = []
+
     watchlist = known_addresses(limit=RADAR_WATCHLIST_SIZE) if RADAR_WATCHLIST_SIZE > 0 else []
 
     # Preserve order (newest discoveries first) while de-duplicating.
-    addresses = list(dict.fromkeys(discovered + watchlist))
+    addresses = list(dict.fromkeys(discovered + pumpfun_discovered + watchlist))
 
-    if watchlist:
+    if watchlist or pumpfun_discovered:
         logger.info(
-            "Querying %s address(es): %s newly discovered + %s from the watchlist",
-            len(addresses), len(discovered), len(watchlist),
+            "Querying %s address(es): %s from DexScreener + %s from Pump.fun + %s from the watchlist",
+            len(addresses), len(discovered), len(pumpfun_discovered), len(watchlist),
         )
 
     if not addresses:

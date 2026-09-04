@@ -92,6 +92,24 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # data source) requires authentication. Never hard-code a real value here.
 DEXSCREENER_API_KEY = os.getenv("DEXSCREENER_API_KEY")
 
+# --- Pump.fun discovery (src/pumpfun_client.py) -- optional, additive-only
+# second discovery feed alongside DexScreener's "latest profiles" feed in
+# src/radar.py. Pump.fun has no free/official discovery API of its own;
+# this uses Solana Tracker's Data API (https://docs.solanatracker.io/data-api,
+# free tier: 2500 requests/month), filtered to market=pumpfun. Leaving
+# PUMPFUN_API_KEY empty costs nothing and makes zero network calls --
+# src/pumpfun_client.is_configured() gates every function on it, exactly
+# like ALPACA_API_KEY/X_BEARER_TOKEN elsewhere in this project. This feed
+# only ever contributes token ADDRESSES to the radar's existing discovery
+# list -- src/dex_client.py remains the only source of the actual
+# liquidity/volume/txns data used for scoring, so a Pump.fun-discovered
+# address that DexScreener has not indexed yet simply yields no pair data
+# this cycle (same as any other momentarily-unindexed address already).
+PUMPFUN_API_KEY = os.getenv("PUMPFUN_API_KEY", "")
+PUMPFUN_ENABLED = _get_bool("PUMPFUN_ENABLED", True)
+PUMPFUN_BASE_URL = "https://data.solanatracker.io"
+PUMPFUN_DISCOVERY_LIMIT = _get_int("PUMPFUN_DISCOVERY_LIMIT", 50)
+
 
 # =============================================================================
 # LIVE TRADING -- disabled by default. Read this whole block before changing

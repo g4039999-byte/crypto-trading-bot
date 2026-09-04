@@ -28,6 +28,7 @@ from pathlib import Path
 from src.news_signal_engine import active_signals, signals_for_symbols
 from src.opportunity_watchlist import NEWS_SIGNAL_WATCHLIST_LINK_ENABLED, get_opportunity, list_all, list_by_status
 from src.performance_analyzer import analyze_recent
+from src.pumpfun_client import is_configured as pumpfun_is_configured
 
 _WALLET_SOURCE_PATH = Path(__file__).resolve().parent / "wallet.py"
 
@@ -208,8 +209,7 @@ def _cmd_status(args):
     print(f"LIVE_TRADING (.env):                       {_env_bool('LIVE_TRADING', False)}")
 
     print("\n=== Discovery / signal sources ===")
-    pumpfun_key = os.getenv("PUMPFUN_API_KEY", "")
-    pumpfun_state = "enabled" if pumpfun_key else "disabled (no PUMPFUN_API_KEY set)"
+    pumpfun_state = "enabled" if pumpfun_is_configured() else "disabled (no PUMPFUN_API_KEY set)"
     print(f"Pump.fun discovery:          {pumpfun_state}")
     print(f"News -> watchlist link:      {'enabled' if NEWS_SIGNAL_WATCHLIST_LINK_ENABLED else 'disabled'}")
     print(f"Adaptive loop interval:      {'enabled' if _env_bool('RADAR_ADAPTIVE_INTERVAL_ENABLED', True) else 'disabled'}")

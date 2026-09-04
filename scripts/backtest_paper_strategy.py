@@ -248,33 +248,110 @@ def run_backtest(strategy, snapshots):
     return all_trades
 
 
-def summarize(name, trades):
+def dataset_time_bounds(snapshots):
+    """(earliest, latest) timestamp across every snapshot in the
+    dataset -- for display only (see compute_oos_cutoff()'s docstring
+    for why the actual split does NOT use the midpoint of this range).
+    """
+    all_ts = _all_snapshot_timestamps(snapshots)
+    return min(all_ts), max(all_ts)
+
+
+def _all_snapshot_timestamps(snapshots):
+    return [
+        _parse_ts(h["timestamp"])
+        for history in snapshots.values()
+        for h in history
+        if h.get("timestamp")
+    ]
+
+
+def compute_oos_cutoff(snapshots, in_sample_fraction=0.7):
+    """A single global cutoff timestamp splitting the dataset into an
+    in-sample fraction (before the cutoff) and an out-of-sample fraction
+    (from the cutoff on) -- the same chronological-holdout principle
+    src/stocks/research_pipeline.py uses (BACKTEST_IN_SAMPLE_FRACTION),
+    applied here per-trade via split_trades_by_cutoff() rather than
+    per-token, since most tokens' own histories are far shorter than the
+    dataset's full span.
+
+    Deliberately the in_sample_fraction-th PERCENTILE of every snapshot's
+    own timestamp, not the midpoint of (earliest, latest) -- the two are
+    very different in practice: SNAPSHOT_HISTORY_LIMIT caps how much
+    history any one token keeps, so as the radar runs longer, older
+    snapshots keep aging out while the number of actively-tracked tokens
+    grows, making the dataset's snapshot DENSITY heavily skewed toward
+    the recent end (observed directly: with SNAPSHOT_HISTORY_LIMIT=60,
+    90% of all snapshots on 2026-09-04 were from the last ~24h even
+    though the earliest single snapshot was ~4.6 days old). A midpoint-
+    of-range cutoff put essentially 100% of trades in the "out-of-sample"
+    bucket and left "in-sample" empty -- useless for validation. The
+    percentile split instead reflects where the actual entry
+    opportunities are, so both buckets end up with real trades to judge.
+    """
+    all_ts = sorted(_all_snapshot_timestamps(snapshots))
+    if not all_ts:
+        raise ValueError("cannot compute an out-of-sample cutoff from an empty dataset")
+    idx = min(len(all_ts) - 1, int(len(all_ts) * in_sample_fraction))
+    return all_ts[idx]
+
+
+def split_trades_by_cutoff(trades, cutoff_ts):
+    """Returns (in_sample, out_of_sample) -- trades entered before
+    cutoff_ts vs at/after it. A trade's *entry* time decides which
+    bucket it falls in, even if it exits after the cutoff (mirrors
+    entering a real position: the decision was made with only
+    in-sample-window information available at that moment).
+    """
+    in_sample = [t for t in trades if t.entry_ts < cutoff_ts]
+    out_of_sample = [t for t in trades if t.entry_ts >= cutoff_ts]
+    return in_sample, out_of_sample
+
+
+def summarize(name, trades, verbose=True):
     n = len(trades)
-    print(f"\n=== {name}: {n} closed trade(s) ===")
+    if verbose:
+        print(f"\n=== {name}: {n} closed trade(s) ===")
     if n == 0:
-        print("(no trades)")
-        return
+        if verbose:
+            print("(no trades)")
+        return {"n": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "avg_win": 0.0, "avg_loss": 0.0, "expectancy": 0.0}
 
     wins = [t for t in trades if t.pnl_usd > 0]
     losses = [t for t in trades if t.pnl_usd <= 0]
     total_pnl = sum(t.pnl_usd for t in trades)
     avg_win = statistics.mean(t.pnl_usd for t in wins) if wins else 0.0
     avg_loss = statistics.mean(t.pnl_usd for t in losses) if losses else 0.0
-    avg_age = statistics.mean(t.entry_age_minutes for t in trades)
-    avg_discovery_to_entry_s = statistics.mean(t.seconds_since_first_seen for t in trades)
+    expectancy = total_pnl / n  # avg $ PnL per trade -- comparable across strategies with different trade counts, unlike raw total_pnl
 
     reason_counts = {}
     for t in trades:
         reason_counts[t.reason] = reason_counts.get(t.reason, 0) + 1
 
-    print(f"wins: {len(wins)} | losses: {len(losses)} | win rate: {100*len(wins)/n:.1f}%")
-    print(f"total PnL: ${total_pnl:+.2f} | avg win: ${avg_win:+.2f} | avg loss: ${avg_loss:+.2f}")
-    print(f"avg age at entry: {avg_age:.1f}m | avg time from first-seen to entry: {avg_discovery_to_entry_s:.0f}s")
-    print(f"exit reasons: {reason_counts}")
+    if verbose:
+        avg_age = statistics.mean(t.entry_age_minutes for t in trades)
+        avg_discovery_to_entry_s = statistics.mean(t.seconds_since_first_seen for t in trades)
+        print(f"wins: {len(wins)} | losses: {len(losses)} | win rate: {100*len(wins)/n:.1f}%")
+        print(f"total PnL: ${total_pnl:+.2f} | expectancy: ${expectancy:+.3f}/trade | avg win: ${avg_win:+.2f} | avg loss: ${avg_loss:+.2f}")
+        print(f"avg age at entry: {avg_age:.1f}m | avg time from first-seen to entry: {avg_discovery_to_entry_s:.0f}s")
+        print(f"exit reasons: {reason_counts}")
     return {
         "n": n, "wins": len(wins), "losses": len(losses), "total_pnl": total_pnl,
-        "avg_win": avg_win, "avg_loss": avg_loss,
+        "avg_win": avg_win, "avg_loss": avg_loss, "expectancy": expectancy,
     }
+
+
+def summarize_with_oos(name, trades, cutoff_ts, verbose=True):
+    """Full-dataset summary plus the same broken out separately for the
+    in-sample and out-of-sample windows (see compute_oos_cutoff()) --
+    the out-of-sample numbers are what should actually decide whether a
+    candidate strategy is adopted, not the aggregate.
+    """
+    overall = summarize(f"{name} (full dataset)", trades, verbose=verbose)
+    in_sample, out_of_sample = split_trades_by_cutoff(trades, cutoff_ts)
+    overall["in_sample"] = summarize(f"{name} (in-sample)", in_sample, verbose=verbose)
+    overall["out_of_sample"] = summarize(f"{name} (out-of-sample)", out_of_sample, verbose=verbose)
+    return overall
 
 
 CURRENT = Strategy(
@@ -300,16 +377,24 @@ def main():
     snapshots = _load_snapshots()
     print(f"Loaded {len(snapshots)} tokens with >=2 usable snapshots from {SNAPSHOT_FILE}")
 
+    cutoff_ts = compute_oos_cutoff(snapshots, in_sample_fraction=0.7)
+    earliest, latest = dataset_time_bounds(snapshots)
+    print(f"Dataset spans {earliest.isoformat()} .. {latest.isoformat()}")
+    print(f"Out-of-sample cutoff (70% in-sample / 30% out-of-sample by time): {cutoff_ts.isoformat()}")
+
     results = {}
     for strategy in (CURRENT, CANDIDATE):
         trades = run_backtest(strategy, snapshots)
-        results[strategy.name] = summarize(strategy.name, trades)
+        results[strategy.name] = summarize_with_oos(strategy.name, trades, cutoff_ts)
 
-    print("\n=== Verdict ===")
+    print("\n=== Verdict (full dataset, then out-of-sample only) ===")
     cur, cand = results[CURRENT.name], results[CANDIDATE.name]
     if cur and cand:
-        print(f"CURRENT:   {cur['n']} trades, {cur['wins']}W/{cur['losses']}L, total PnL ${cur['total_pnl']:+.2f}")
-        print(f"CANDIDATE: {cand['n']} trades, {cand['wins']}W/{cand['losses']}L, total PnL ${cand['total_pnl']:+.2f}")
+        print(f"CURRENT:   {cur['n']} trades, {cur['wins']}W/{cur['losses']}L, total PnL ${cur['total_pnl']:+.2f}, expectancy ${cur['expectancy']:+.3f}/trade")
+        print(f"CANDIDATE: {cand['n']} trades, {cand['wins']}W/{cand['losses']}L, total PnL ${cand['total_pnl']:+.2f}, expectancy ${cand['expectancy']:+.3f}/trade")
+        cur_oos, cand_oos = cur["out_of_sample"], cand["out_of_sample"]
+        print(f"CURRENT   out-of-sample:   {cur_oos['n']} trades, expectancy ${cur_oos['expectancy']:+.3f}/trade")
+        print(f"CANDIDATE out-of-sample:   {cand_oos['n']} trades, expectancy ${cand_oos['expectancy']:+.3f}/trade")
 
 
 if __name__ == "__main__":
