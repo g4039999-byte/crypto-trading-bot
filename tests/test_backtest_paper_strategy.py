@@ -14,6 +14,7 @@ from scripts.backtest_paper_strategy import (
     Trade,
     _check_exit,
     _passes_entry,
+    _row,
     _update_trailing_stop,
     _velocity_cap_applies,
     assign_fold_index,
@@ -106,6 +107,27 @@ class TestSummarize(unittest.TestCase):
         summary = summarize("mix", trades, verbose=False)
         self.assertEqual(summary["wins"], 1)
         self.assertEqual(summary["losses"], 2)  # a breakeven (pnl_usd == 0) trade counts as a loss, not a win
+
+
+class TestRow(unittest.TestCase):
+    """_row() formats a summarize()/full_report() dict for the
+    comparison printouts -- an empty bucket (e.g. a variant whose
+    out-of-sample slice happens to have zero trades) is a completely
+    normal, expected outcome, not a reason to crash a whole comparison
+    run (regression: this used to raise TypeError formatting None).
+    """
+
+    def test_does_not_raise_on_a_completely_empty_summary(self):
+        empty = summarize("empty", [], verbose=False)
+        row = _row("out-of-sample", empty)
+        self.assertIn("n=   0", row)
+        self.assertIn("n/a", row)
+
+    def test_a_populated_summary_shows_real_numbers_not_n_a(self):
+        trades = [_trade("2026-09-01T00:00:00+00:00", 1.0), _trade("2026-09-01T00:00:00+00:00", -1.0)]
+        summary = summarize("mix", trades, verbose=False)
+        row = _row("full", summary)
+        self.assertNotIn("n/a", row)
 
 
 class TestSummarizeWithOos(unittest.TestCase):

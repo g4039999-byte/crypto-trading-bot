@@ -128,6 +128,13 @@ class Strategy:
     # either mechanism, both, or neither).
     velocity_spike_threshold_pct_per_min: float = None
     velocity_spike_cooldown_minutes: float = None
+    # --- Round 3 (2026-09-04): cumulative buy_ratio (buys_24h/(buys_24h+
+    # sells_24h) since the token's own first snapshot -- NOT the same
+    # measure as trend's short-term flow delta) was the other
+    # fold-consistent signal scripts/diagnose_paper_strategy.py found
+    # (deliberately deferred at the time: "will test independently").
+    # None = no floor (original behavior).
+    min_buy_ratio: float = None
 
 
 @dataclass
@@ -289,6 +296,9 @@ def _passes_entry(evaluated, strategy, previous_evaluated=None):
             return False
     if strategy.require_trend_persistence and evaluated["trend"] in _ELEVATED_TRENDS:
         if previous_evaluated is None or previous_evaluated["trend"] not in _ELEVATED_TRENDS:
+            return False
+    if strategy.min_buy_ratio is not None:
+        if evaluated["buy_ratio"] is None or evaluated["buy_ratio"] < strategy.min_buy_ratio:
             return False
     if strategy.max_liq_drawdown_pct is not None and evaluated["liq_drawdown_pct"] > strategy.max_liq_drawdown_pct:
         return False
@@ -734,6 +744,43 @@ TRAIL_CAPPED = Strategy(
 TRAILING_VARIANTS = (TRAIL_IMMEDIATE, TRAIL_ARMED_TIGHT, TRAIL_ARMED_WIDE, TRAIL_ARMED_LATE, TRAIL_CAPPED)
 
 
+def _trail_on_candidate(name, **overrides):
+    """A trailing-stop variant built from the CURRENTLY DEPLOYED
+    CANDIDATE (round 1 + round 2's adopted entry rules), not the
+    original pre-round-1 population TRAILING_VARIANTS above was tested
+    against. Safe to build directly from CANDIDATE (no risk of
+    comparing a winner against itself, unlike _candidate_variant/
+    _current_candidate_variant/_round3_candidate_variant above) --
+    CANDIDATE's own trailing_arm_pct/trailing_stop_pct are both None
+    (trailing has never been adopted), so these overrides only ever add
+    a new exit mechanic on top, never silently double up on one already
+    baked into CANDIDATE itself.
+    """
+    from dataclasses import replace
+    return replace(CANDIDATE, name=name, **overrides)
+
+
+# Round 4 (2026-09-04): re-test trailing stops now that entry quality is
+# measurably different (round 1+2 roughly halved trade volume and
+# lifted full-dataset profit_factor above 1.0) -- the ORIGINAL rejection
+# above was against a much noisier, unfiltered entry population; a
+# genuinely different population is a legitimate reason to re-check a
+# previously-rejected idea, not overfitting.
+TRAIL_V2_ARMED_TIGHT = _trail_on_candidate(
+    "TRAIL_V2_ARMED_TIGHT (on the round-1+2 CANDIDATE: arm at +15%, trail 10%, uncapped)",
+    take_profit_pct=None, trailing_arm_pct=15, trailing_stop_pct=10,
+)
+TRAIL_V2_ARMED_WIDE = _trail_on_candidate(
+    "TRAIL_V2_ARMED_WIDE (on the round-1+2 CANDIDATE: arm at +15%, trail 15%, uncapped)",
+    take_profit_pct=None, trailing_arm_pct=15, trailing_stop_pct=15,
+)
+TRAIL_V2_CAPPED = _trail_on_candidate(
+    "TRAIL_V2_CAPPED (on the round-1+2 CANDIDATE: arm at +15%, trail 10%, capped at +150%)",
+    take_profit_pct=150, trailing_arm_pct=15, trailing_stop_pct=10,
+)
+TRAILING_VARIANTS_V2 = (TRAIL_V2_ARMED_TIGHT, TRAIL_V2_ARMED_WIDE, TRAIL_V2_CAPPED)
+
+
 def _candidate_variant(name, **overrides):
     """A Strategy identical to _PRE_ELEVATED_TREND_GATE_BASE (CANDIDATE's
     rules BEFORE the 2026-09-04 elevated-trend-score change) except for
@@ -861,16 +908,57 @@ RISING_VELOCITY_VARIANTS = (
 )
 
 
+# Round 2's fully-adopted rules (ENTRY_SCORE_PENALTY_55 +
+# ENTRY_VELOCITY_SPIKE_COOLDOWN) -- round 3's own baseline, captured
+# BEFORE round 3's own change so its variants (via
+# _round3_candidate_variant()) are tested against it, not against
+# whatever round 3 itself ends up adopting.
+_PRE_BUY_RATIO_GATE_BASE = Strategy(
+    name="pre-round-3 baseline (not directly used as a comparison target)",
+    min_score=40, entry_trends=("STRONG", "RISING", "NEUTRAL"),
+    min_liquidity_usd=5000, min_volume_24h_usd=25000,
+    min_age_minutes=15, max_age_minutes=180,
+    stop_loss_pct=25, take_profit_pct=25, max_holding_minutes=240,
+    max_liq_drawdown_pct=40, stop_loss_cooldown_minutes=60,
+    trend_score_override={"RISING": 55, "STRONG": 55},
+    velocity_spike_threshold_pct_per_min=5.0, velocity_spike_cooldown_minutes=30,
+)
+
+
+def _round3_candidate_variant(name, **overrides):
+    from dataclasses import replace
+    return replace(_PRE_BUY_RATIO_GATE_BASE, name=name, **overrides)
+
+
+# --- Round 3 (2026-09-04): the OTHER fold-consistent signal
+# scripts/diagnose_paper_strategy.py found (buy_ratio -- cumulative
+# buys_24h/(buys_24h+sells_24h) since first-seen, a DIFFERENT, longer-
+# window measure than trend's short-term flow delta), deliberately
+# deferred at the time ("will test independently"). Three floors tested.
+ENTRY_BUY_RATIO_55 = _round3_candidate_variant("ENTRY_BUY_RATIO_55 (buy_ratio>=0.55 required for every entry)", min_buy_ratio=0.55)
+ENTRY_BUY_RATIO_60 = _round3_candidate_variant("ENTRY_BUY_RATIO_60 (buy_ratio>=0.60 required for every entry)", min_buy_ratio=0.60)
+ENTRY_BUY_RATIO_65 = _round3_candidate_variant("ENTRY_BUY_RATIO_65 (buy_ratio>=0.65 required for every entry)", min_buy_ratio=0.65)
+
+BUY_RATIO_VARIANTS = (ENTRY_BUY_RATIO_55, ENTRY_BUY_RATIO_60, ENTRY_BUY_RATIO_65)
+
+
 N_FOLDS = 4  # walk-forward folds -- kept smaller than the stocks side's 5 given ~4.6 days of data vs stocks' 10 years; see fold_stability_score's docstring
 MIN_TRADES_FOR_SIGNIFICANCE = 30  # a strategy with fewer trades than this in a bucket is not judged on that bucket
 
 
 def _row(label, s):
+    """Formats one summary dict for display. Every field guarded against
+    None -- an empty bucket (0 trades, e.g. a variant's out-of-sample
+    slice with nothing in it) is a completely normal, expected outcome
+    here, not a reason to crash the whole comparison run.
+    """
     pf = s["profit_factor"]
     pf_str = "inf" if pf == float("inf") else ("n/a" if pf is None else f"{pf:.2f}")
     dd = s["max_drawdown_pct"]
     dd_str = "n/a" if dd is None else f"{dd:.1f}pp"
-    return f"{label:<12} n={s['n']:>4}  PF={pf_str:>5}  maxDD={dd_str:>8}  expectancy=${s['expectancy']:+.3f}/trade ({s['expectancy_pct']:+.2f}%)"
+    exp_pct = s["expectancy_pct"]
+    exp_pct_str = "n/a" if exp_pct is None else f"{exp_pct:+.2f}%"
+    return f"{label:<12} n={s['n']:>4}  PF={pf_str:>5}  maxDD={dd_str:>8}  expectancy=${s['expectancy']:+.3f}/trade ({exp_pct_str})"
 
 
 def full_report(strategy, snapshots, cutoff_ts, fold_boundaries, verbose=False):
@@ -971,6 +1059,11 @@ def main():
     print(f"Walk-forward folds: {N_FOLDS} (boundaries: {[b.isoformat() for b in fold_boundaries]})")
 
     compare_group("TRAILING-STOP VARIANTS", CANDIDATE, TRAILING_VARIANTS, snapshots, cutoff_ts, fold_boundaries)
+    # Round 4: re-test trailing stops on the CURRENT (round 1+2) entry
+    # population, not the original pre-round-1 one above -- a materially
+    # different population is a legitimate reason to re-check a
+    # previously-rejected idea.
+    compare_group("TRAILING-STOP VARIANTS V2 (round 4, on round 1+2's CANDIDATE)", CANDIDATE, TRAILING_VARIANTS_V2, snapshots, cutoff_ts, fold_boundaries)
     # Compared against _PRE_ELEVATED_TREND_GATE_BASE (CANDIDATE's rules
     # BEFORE this session's adopted change), not the current CANDIDATE --
     # CANDIDATE now already includes ENTRY_SCORE_PENALTY_55's change, so
@@ -990,6 +1083,11 @@ def main():
     compare_group(
         "RISING/HIGH-VELOCITY VARIANTS (round 2, layered on round 1's adopted CANDIDATE)",
         _PRE_VELOCITY_SPIKE_GATE_BASE, RISING_VELOCITY_VARIANTS,
+        snapshots, cutoff_ts, fold_boundaries, report_rising_strong_velocity=True,
+    )
+    compare_group(
+        "BUY_RATIO VARIANTS (round 3, layered on round 1+2's adopted CANDIDATE)",
+        _PRE_BUY_RATIO_GATE_BASE, BUY_RATIO_VARIANTS,
         snapshots, cutoff_ts, fold_boundaries, report_rising_strong_velocity=True,
     )
 
