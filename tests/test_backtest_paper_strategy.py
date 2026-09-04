@@ -10,6 +10,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from scripts.backtest_paper_strategy import (
+    CANDIDATE,
     Strategy,
     Trade,
     _check_exit,
@@ -18,6 +19,7 @@ from scripts.backtest_paper_strategy import (
     _update_trailing_stop,
     _velocity_cap_applies,
     assign_fold_index,
+    broad_scan_strategy,
     compute_fold_boundaries,
     compute_oos_cutoff,
     fold_stability_score,
@@ -128,6 +130,32 @@ class TestRow(unittest.TestCase):
         summary = summarize("mix", trades, verbose=False)
         row = _row("full", summary)
         self.assertNotIn("n/a", row)
+
+
+class TestBroadScanStrategy(unittest.TestCase):
+    def test_defaults_to_candidate_with_score_and_trend_gates_removed(self):
+        strategy = broad_scan_strategy()
+        self.assertEqual(strategy.min_score, 0)
+        self.assertEqual(set(strategy.entry_trends), {"STRONG", "RISING", "NEUTRAL", "WEAK"})
+        self.assertIsNone(strategy.trend_score_override)
+        self.assertIsNone(strategy.max_velocity_pct_per_min)
+        self.assertIsNone(strategy.velocity_spike_threshold_pct_per_min)
+        self.assertFalse(strategy.require_trend_persistence)
+        self.assertIsNone(strategy.min_buy_ratio)
+
+    def test_preserves_risk_protections_from_the_base_strategy(self):
+        strategy = broad_scan_strategy()
+        self.assertEqual(strategy.stop_loss_pct, CANDIDATE.stop_loss_pct)
+        self.assertEqual(strategy.take_profit_pct, CANDIDATE.take_profit_pct)
+        self.assertEqual(strategy.stop_loss_cooldown_minutes, CANDIDATE.stop_loss_cooldown_minutes)
+        self.assertEqual(strategy.max_liq_drawdown_pct, CANDIDATE.max_liq_drawdown_pct)
+        self.assertEqual(strategy.min_liquidity_usd, CANDIDATE.min_liquidity_usd)
+
+    def test_accepts_a_different_base_strategy(self):
+        custom = _entry_strategy(stop_loss_pct=30)
+        strategy = broad_scan_strategy(custom)
+        self.assertEqual(strategy.stop_loss_pct, 30)
+        self.assertEqual(strategy.min_score, 0)
 
 
 class TestSummarizeWithOos(unittest.TestCase):

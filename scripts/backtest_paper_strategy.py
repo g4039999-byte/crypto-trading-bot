@@ -781,6 +781,53 @@ TRAIL_V2_CAPPED = _trail_on_candidate(
 TRAILING_VARIANTS_V2 = (TRAIL_V2_ARMED_TIGHT, TRAIL_V2_ARMED_WIDE, TRAIL_V2_CAPPED)
 
 
+# Round 5 (2026-09-04): structural scoring/trend-gate recalibration.
+# WEAK (src.observation.compute_trend's 4th classification -- price
+# down >10% OR recent buy-flow <40% -- currently excluded from
+# PAPER_ENTRY_TRENDS entirely) showed a striking result in an
+# unrestricted (min_score=0, every trend) broad scan of 139 trades:
+# win=58.6%/PF=1.48/expectancy=+7.55%, the best of any trend bucket
+# including NEUTRAL. At the DEPLOYED min_score=40 floor specifically,
+# that edge did not reproduce (WEAK_ONLY here underperforms CANDIDATE) --
+# the broad-scan finding is likely driven by low-score WEAK candidates
+# specifically, not WEAK in general. Tested anyway at the deployed score
+# floor since it's cheap to check: modest full-dataset improvement,
+# out-of-sample too thin (n=2-3) to trust. Not adopted -- flagged as the
+# clearest lead for a future round once more live paper-trading data
+# has accumulated (would need a low-score-WEAK-specific test, which
+# needs a bigger dataset than exists right now to hold out an OOS split
+# for it credibly).
+ENTRY_ADD_WEAK = _trail_on_candidate("ENTRY_ADD_WEAK (allow WEAK trend alongside STRONG/RISING/NEUTRAL)", entry_trends=("STRONG", "RISING", "NEUTRAL", "WEAK"))
+ENTRY_NEUTRAL_WEAK_ONLY = _trail_on_candidate("ENTRY_NEUTRAL_WEAK_ONLY (drop STRONG/RISING entirely, keep only NEUTRAL+WEAK)", entry_trends=("NEUTRAL", "WEAK"))
+ENTRY_WEAK_ONLY = _trail_on_candidate("ENTRY_WEAK_ONLY (WEAK trend exclusively)", entry_trends=("WEAK",))
+WEAK_TREND_VARIANTS = (ENTRY_ADD_WEAK, ENTRY_NEUTRAL_WEAK_ONLY, ENTRY_WEAK_ONLY)
+
+
+def broad_scan_strategy(base_strategy=None):
+    """A maximally-permissive Strategy (min_score=0, every trend
+    including WEAK) for correlation/tercile analysis with real
+    statistical power -- CANDIDATE's own score/trend gates already
+    exclude most of the population, which is exactly why per-feature
+    correlation analysis run only on CANDIDATE's own (thin) trade set
+    is underpowered. Keeps every RISK protection (SL/TP/cooldown/
+    liquidity-drawdown-guard/liquidity/volume/age floors) unchanged --
+    only the score/trend SELECTION gate is removed, so the resulting
+    trades are still realistic "would-have-been-taken-if-allowed-
+    through" trades, not arbitrary noise. base_strategy defaults to
+    CANDIDATE (keeps its SL/TP/cooldown/etc); pass a different Strategy
+    to broaden a different rule set the same way.
+    """
+    from dataclasses import replace
+    base_strategy = base_strategy or CANDIDATE
+    return replace(
+        base_strategy, name="broad-scan (min_score=0, every trend)",
+        min_score=0, entry_trends=("STRONG", "RISING", "NEUTRAL", "WEAK"),
+        trend_score_override=None, max_velocity_pct_per_min=None,
+        velocity_spike_threshold_pct_per_min=None, velocity_spike_cooldown_minutes=None,
+        require_trend_persistence=False, min_buy_ratio=None,
+    )
+
+
 def _candidate_variant(name, **overrides):
     """A Strategy identical to _PRE_ELEVATED_TREND_GATE_BASE (CANDIDATE's
     rules BEFORE the 2026-09-04 elevated-trend-score change) except for
@@ -1090,6 +1137,10 @@ def main():
         _PRE_BUY_RATIO_GATE_BASE, BUY_RATIO_VARIANTS,
         snapshots, cutoff_ts, fold_boundaries, report_rising_strong_velocity=True,
     )
+    # Round 5: safe to build directly from CANDIDATE (entry_trends is
+    # orthogonal to CANDIDATE's own adopted fields, same reasoning as
+    # _trail_on_candidate above).
+    compare_group("WEAK-TREND VARIANTS (round 5)", CANDIDATE, WEAK_TREND_VARIANTS, snapshots, cutoff_ts, fold_boundaries)
 
 
 if __name__ == "__main__":
