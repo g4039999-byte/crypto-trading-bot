@@ -66,6 +66,7 @@ from src.momentum import calculate_momentum  # noqa: E402
 from src.observation import compute_trend  # noqa: E402
 from src.risk import assess_token_safety  # noqa: E402
 from src.scoring import calculate_score  # noqa: E402
+from src.stage import classify_stage  # noqa: E402
 from src.stocks.performance import compute_metrics  # noqa: E402 -- market-agnostic; operates on plain pnl_pct floats
 
 SNAPSHOT_FILE = PROJECT_ROOT / "data" / "snapshots.json"
@@ -109,6 +110,20 @@ class Trade:
     pnl_pct: float = None
     peak_price: float = None  # highest price seen since entry -- what a trailing stop trails against
     trailing_stop_price: float = None  # the trailing stop's current level, once armed (None until then, or if trailing is disabled)
+    # Extra entry-time context, purely for diagnostic breakdown (scripts/
+    # diagnose_paper_strategy.py) -- never read by replay_token/_check_exit
+    # itself, so adding these cannot change any backtest result.
+    entry_base_score: int = None
+    entry_momentum_score: int = None
+    entry_liquidity: float = None
+    entry_volume: float = None
+    entry_buy_ratio: float = None
+    entry_price_change_pct: float = None
+    entry_velocity_pct_per_min: float = None
+    entry_relative_volume: float = None
+    entry_stage: str = None
+    entry_liq_drawdown_pct: float = None
+    discovery_to_entry_seconds: float = None  # alias of seconds_since_first_seen, kept for naming parity with the real system's paper_trader.py field
 
 
 def _parse_ts(s):
@@ -173,15 +188,33 @@ def _evaluate_point(history, idx):
     liquidity = current.get("liquidity_usd") or 0
     liq_drawdown_pct = ((peak_liq - liquidity) / peak_liq * 100) if peak_liq else 0.0
 
+    buys = current.get("buys_24h") or 0
+    sells = current.get("sells_24h") or 0
+    volume = current.get("volume_24h") or 0
+    # "Speed of movement": % price change since first-seen per minute of
+    # age -- a token up 20% over 10 minutes and one up 20% over 200
+    # minutes score identically on price_change_pct alone; this
+    # separates them, for the diagnostic breakdown in
+    # scripts/diagnose_paper_strategy.py (item 4's "سرعة الحركة").
+    velocity_pct_per_min = (price_change_pct / age_minutes) if age_minutes else 0.0
+    relative_volume = (volume / liquidity) if liquidity else 0.0
+
     return {
         "score": score,
+        "base_score": base_score,
+        "momentum_score": momentum_score,
         "trend": trend,
         "liquidity": current.get("liquidity_usd"),
         "volume": current.get("volume_24h"),
         "age": age_minutes,
-        "buys": current.get("buys_24h") or 0,
-        "sells": current.get("sells_24h") or 0,
+        "stage": classify_stage(age_minutes),
+        "buys": buys,
+        "sells": sells,
+        "buy_ratio": (buys / (buys + sells)) if (buys + sells) else None,
         "price_usd": price,
+        "price_change_pct": price_change_pct,
+        "velocity_pct_per_min": velocity_pct_per_min,
+        "relative_volume": relative_volume,
         "liq_drawdown_pct": liq_drawdown_pct,
     }
 
@@ -294,12 +327,20 @@ def replay_token(token, history, strategy):
 
         evaluated = _evaluate_point(history, idx)
         if _passes_entry(evaluated, strategy):
+            discovery_to_entry_s = (ts - _parse_ts(history[0]["timestamp"])).total_seconds()
             in_position = Trade(
                 token=token, entry_idx=idx, entry_ts=ts, entry_price=price,
                 entry_score=evaluated["score"], entry_trend=evaluated["trend"],
                 entry_age_minutes=evaluated["age"],
-                seconds_since_first_seen=(ts - _parse_ts(history[0]["timestamp"])).total_seconds(),
+                seconds_since_first_seen=discovery_to_entry_s,
                 peak_price=price,
+                entry_base_score=evaluated["base_score"], entry_momentum_score=evaluated["momentum_score"],
+                entry_liquidity=evaluated["liquidity"], entry_volume=evaluated["volume"],
+                entry_buy_ratio=evaluated["buy_ratio"], entry_price_change_pct=evaluated["price_change_pct"],
+                entry_velocity_pct_per_min=evaluated["velocity_pct_per_min"],
+                entry_relative_volume=evaluated["relative_volume"], entry_stage=evaluated["stage"],
+                entry_liq_drawdown_pct=evaluated["liq_drawdown_pct"],
+                discovery_to_entry_seconds=discovery_to_entry_s,
             )
 
     return trades
